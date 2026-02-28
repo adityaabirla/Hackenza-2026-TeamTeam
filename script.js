@@ -134,6 +134,7 @@ function binaryToText(binary) {
   const trimmed = binary.slice(0, Math.floor(binary.length / 16) * 16);
   let result = "";
   let errorFound = false;
+  let conflictDetails = [];
 
   for (let i = 0; i < trimmed.length; i += 16) {
     const byte1 = trimmed.slice(i, i + 8);
@@ -142,13 +143,16 @@ function binaryToText(binary) {
       result += String.fromCharCode(parseInt(byte1, 2));
     } else {
       errorFound = true;
+      const char1 = String.fromCharCode(parseInt(byte1, 2));
+      const char2 = String.fromCharCode(parseInt(byte2, 2));
+      conflictDetails.push(`Block ${i / 16 + 1}: ${byte1} ('${char1}') vs ${byte2} ('${char2}')`);
     }
   }
 
   if (errorFound) {
-    return "STREAM CONFLICTED";
+    return { error: true, message: "STREAM CONFLICTED", details: conflictDetails };
   }
-  return result;
+  return { error: false, message: result };
 }
 
 /** Append a timestamped entry to a log element */
@@ -967,7 +971,29 @@ function updateLiveDecode() {
  * @param {string} bits - binary string of the payload (no preamble/postamble)
  */
 function decodePayload(bits) {
-  const text = binaryToText(bits);
+  const decoded = binaryToText(bits);
+  
+  if (decoded.error) {
+    log("rx-log", `✗ Decode Error: ${decoded.message}`, "err");
+    decoded.details.forEach(detail => log("rx-log", `  - ${detail}`, "err"));
+    
+    // Update main decoded output to show the conflict details
+    const conflictHTML = `<div style="color:var(--red);"><strong>${decoded.message}</strong></div>` + 
+                         decoded.details.map(d => `<div style="font-size:11px; margin-top:4px;">${escapeHtml(d)}</div>`).join("");
+    decodedOutput.innerHTML = conflictHTML;
+    decodedOutput.classList.add("flash");
+    setTimeout(() => decodedOutput.classList.remove("flash"), 2000);
+    
+    // Update signal
+    setSignal("error", "RX ERROR");
+    updateBanner("error", `✗ DECODE FAILED: STREAM CONFLICTED`, "⚠");
+    
+    messageCount++;
+    addToMessageHistory("[ERROR] STREAM CONFLICTED");
+    return;
+  }
+  
+  const text = decoded.message;
   log("rx-log", `✓ Decoded: "${text}" (${bits.length} bits → ${text.length} chars)`, "ok");
 
   // Update main decoded output
