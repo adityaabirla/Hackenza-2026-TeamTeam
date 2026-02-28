@@ -1455,24 +1455,41 @@ function renderDebugLog() {
   });
   html += '</div>';
 
-  // ── 8-BIT CHARACTER MAP — shows ASCII equivalent of every raw 8-bit group ──
-  const allBits = debugBitLog.map(e => e.bit).join("");
-  if (allBits.length >= 8) {
-    html += '<div class="debug-section-title" style="margin-top:8px">8-BIT CHARACTER MAP (raw stream → ASCII)</div>';
+  // ── PROTOCOL FRAME BREAKDOWN — show preamble, data octets, postamble separately ──
+  const syncBits = debugBitLog.filter(e => e.state === "SYNC" || e.state === "SCANNING").map(e => e.bit).join("");
+  const dataBits = debugBitLog.filter(e => e.state === "READING").map(e => e.bit).join("");
+
+  if (dataBits.length >= 8) {
+    html += '<div class="debug-section-title" style="margin-top:8px">8-BIT CHARACTER MAP (payload only → ASCII)</div>';
+
+    // Show preamble/sync bits as a labeled group
+    if (syncBits.length > 0) {
+      html += `<div style="font-size:10px; margin-bottom:4px;"><span style="color:var(--cyan); font-size:9px; padding:1px 4px; border:1px solid var(--cyan); border-radius:3px; margin-right:6px;">PREAMBLE/SYNC</span><code style="color:var(--cyan);">${syncBits}</code> <span style="color:var(--text-dim);">(${syncBits.length} bits)</span></div>`;
+    }
+
+    // Show data bits in 8-bit groups with ASCII equivalents
     html += '<div class="debug-chars" style="font-size:10px; line-height:1.8;">';
-    const numOctets = Math.floor(allBits.length / 8);
+    const numOctets = Math.floor(dataBits.length / 8);
     for (let i = 0; i < numOctets; i++) {
-      const octet = allBits.substr(i * 8, 8);
+      const octet = dataBits.substr(i * 8, 8);
       const code = parseInt(octet, 2);
       const ch = (code >= 32 && code <= 126) ? String.fromCharCode(code) : '\u00B7';
       const displayCh = ch === '~' ? '~(SP)' : escapeHtml(ch);
-      html += `<span style="display:inline-block; margin:2px 3px; padding:2px 5px; border:1px solid var(--border); border-radius:3px; background:rgba(255,255,255,0.03);" title="0x${code.toString(16).toUpperCase().padStart(2,'0')} (${code})">`
-        + `<code style="color:var(--amber);">${octet}</code> `
-        + `<strong style="color:var(--cyan);">${displayCh}</strong></span>`;
+      // Highlight which copy this is within the 24-bit triple (A/B/C)
+      const copyIdx = i % 3;
+      const copyLabel = ['A', 'B', 'C'][copyIdx];
+      const charNum = Math.floor(i / 3) + 1;
+      const copyColors = ['var(--amber)', 'var(--amber-dim)', 'var(--text-dim)'];
+      // Add a visual separator between characters (every 3 octets)
+      const borderStyle = (i > 0 && copyIdx === 0) ? 'margin-left:8px; border-left:2px solid var(--border); padding-left:6px;' : '';
+      html += `<span style="display:inline-block; margin:2px 3px; padding:2px 5px; border:1px solid var(--border); border-radius:3px; background:rgba(255,255,255,0.03); ${borderStyle}" title="Char #${charNum} Copy ${copyLabel} — 0x${code.toString(16).toUpperCase().padStart(2,'0')} (${code})">`
+        + `<code style="color:${copyColors[copyIdx]};">${octet}</code> `
+        + `<strong style="color:var(--cyan);">${displayCh}</strong>`
+        + `<span style="font-size:8px; color:var(--text-dim); margin-left:2px;">${copyLabel}</span></span>`;
     }
-    const remBits = allBits.length - numOctets * 8;
+    const remBits = dataBits.length - numOctets * 8;
     if (remBits > 0) {
-      html += `<span style="display:inline-block; margin:2px 3px; color:var(--text-dim);"><code>${allBits.substr(numOctets * 8)}...</code> (${remBits}/8)</span>`;
+      html += `<span style="display:inline-block; margin:2px 3px; color:var(--text-dim);"><code>${dataBits.substr(numOctets * 8)}...</code> (${remBits}/8)</span>`;
     }
     html += '</div>';
   }
