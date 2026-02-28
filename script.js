@@ -51,6 +51,9 @@ const CALIB_DURATION_MS  = 2000;    // how long to measure ambient during calibr
 const ROI_SIZE           = 50;      // pixels — size of the "Target Box" sample region
 const GRAPH_HISTORY      = 120;     // number of brightness samples to show on chart
 const EMA_ALPHA          = 0.02;    // exponential moving average coefficient for slow ambient drift
+const SPACE_CHAR         = "~";     // substitute for space during OOK (avoids long zero runs)
+const BRIGHTNESS_BUFFER_SIZE = 7;   // median filter window (odd number for clean median)
+const EDGE_CONFIRM_COUNT = 3;       // consecutive bright samples needed to confirm a real edge
 
 // ─────────────────────────────────────────────
 //  BOOT ANIMATION
@@ -115,6 +118,19 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+/**
+ * MEDIAN FILTER — rejects camera glitch spikes.
+ * Maintains a rolling buffer of raw brightness values and returns the median.
+ * Single-frame camera API hiccups (shakes, exposure jumps) are rejected.
+ */
+let brightnessBuffer = [];
+function medianFilter(raw) {
+  brightnessBuffer.push(raw);
+  if (brightnessBuffer.length > BRIGHTNESS_BUFFER_SIZE) brightnessBuffer.shift();
+  const sorted = [...brightnessBuffer].sort((a, b) => a - b);
+  return sorted[Math.floor(sorted.length / 2)];
+}
+
 /** Convert a string to its ASCII binary representation.
  *  Each character → 16-bit binary string (duplicated 8-bit block).
  *  Example: "Hi" → "0100100001001000..."
@@ -146,11 +162,13 @@ function binaryToText(binary) {
       const char1 = String.fromCharCode(parseInt(byte1, 2));
       const char2 = String.fromCharCode(parseInt(byte2, 2));
       conflictDetails.push(`Block ${i / 16 + 1}: ${byte1} ('${char1}') vs ${byte2} ('${char2}')`);
+      // Best-effort recovery: use first byte (earlier sample, less drift-affected)
+      result += char1;
     }
   }
 
   if (errorFound) {
-    return { error: true, message: "STREAM CONFLICTED", details: conflictDetails };
+    return { error: true, message: result, details: conflictDetails };
   }
   return { error: false, message: result };
 }
@@ -209,15 +227,25 @@ btnConvert.addEventListener("click", () => {
   const text = senderInput.value.trim();
   if (!text) return;
 
-  const binary = textToBinary(text);
+  // Replace spaces with ~ to avoid long zero-runs in OOK channel
+  // Space (ASCII 32 = 00100000) has 6 consecutive zeros matching POSTAMBLE!
+  // Tilde (ASCII 126 = 01111110) has mostly 1s — ideal for optical sync
+  const wireText = text.replace(/ /g, SPACE_CHAR);
+  if (wireText !== text) {
+    log("tx-log", `Spaces → ~: "${text}" → "${wireText}"`, "info");
+  }
+
+  const binary = textToBinary(wireText);
 
   // Render each character and its 16 bits for debugging
   let dbgHTML = "";
-  for (let i = 0; i < text.length; i++) {
-    const char = text[i];
+  for (let i = 0; i < wireText.length; i++) {
+    const char = wireText[i];
+    const origChar = text[i] || '';
     const bin1 = binary.substr(i * 16, 8);
     const bin2 = binary.substr(i * 16 + 8, 8);
-    dbgHTML += `<div style="margin-bottom: 4px; font-size: 11px;"><code>${bin1} ${bin2}</code> <span style="color:var(--text-dim);">→</span> <strong style="color:var(--cyan);">${char === ' ' ? 'SPACE' : char}</strong></div>`;
+    const displayChar = origChar === ' ' ? 'SPACE→~' : char;
+    dbgHTML += `<div style="margin-bottom: 4px; font-size: 11px;"><code>${bin1} ${bin2}</code> <span style="color:var(--text-dim);">→</span> <strong style="color:var(--cyan);">${displayChar}</strong></div>`;
   }
   binaryDisplay.innerHTML = dbgHTML;
 
@@ -409,6 +437,9 @@ let sampleTimeout    = null;
 let samplerLoopActive = false;
 let readingStartTime = 0;       // Timestamp when READING state started
 let lastBitConfidence = 0;      // Confidence of last bit decision (0-100)
+let edgeConfirmCounter = 0;     // Counter for confirmed consecutive bright readings
+let debugBitLog = [];           // Full debug log of every bit with metadata
+let rawBrightnessHistory = [];  // Unfiltered brightness values for debug
 
 // Robustness constants
 const MULTI_SAMPLE_COUNT  = 5;      // Sub-samples per bit period for majority voting
@@ -483,11 +514,28 @@ async function startReceiver() {
   try {
     rxStream = await navigator.mediaDevices.getUserMedia({
       video: {
-        facingMode: "environment",  // Use back camera for light detection
-        width:  { ideal: 1280 },
-        height: { ideal: 720 }
+        facingMode: "environment",
+        width:  { ideal: 640 },
+        height: { ideal: 480 },
+        frameRate: { ideal: 60, min: 30 }
       }
     });
+
+    // Lock camera exposure/WB/focus to prevent auto-adjustments causing glitches
+    try {
+      const vTrack = rxStream.getVideoTracks()[0];
+      const caps = vTrack.getCapabilities ? vTrack.getCapabilities() : {};
+      const adv = {};
+      if (caps.exposureMode)     adv.exposureMode     = "manual";
+      if (caps.whiteBalanceMode) adv.whiteBalanceMode  = "manual";
+      if (caps.focusMode)        adv.focusMode         = "manual";
+      if (Object.keys(adv).length > 0) {
+        await vTrack.applyConstraints({ advanced: [adv] });
+        log("rx-log", "Camera locked: manual exposure/WB/focus ✓", "ok");
+      }
+    } catch (lockErr) {
+      log("rx-log", "Camera lock unavailable — auto mode (may cause glitches)", "info");
+    }
   } catch (err) {
     log("rx-log", `Camera error: ${err.message}`, "err");
     setSignal("error", "NO CAM");
@@ -507,9 +555,13 @@ async function startReceiver() {
   setSignal("active", "RX LIVE");
   log("rx-log", `Camera started: ${hiddenCanvas.width}×${hiddenCanvas.height}`, "ok");
 
-  // Reset message state
-  rxBitBuffer    = [];
-  preambleWindow = [];
+  // Reset all state for new session
+  rxBitBuffer         = [];
+  preambleWindow      = [];
+  brightnessBuffer    = [];
+  debugBitLog         = [];
+  rawBrightnessHistory = [];
+  edgeConfirmCounter  = 0;
 
   // Start 60fps brightness sampling loop (for graph & calibration)
   startBrightnessLoop();
@@ -535,9 +587,13 @@ function stopReceiver() {
   rxVideo.srcObject = null;
   rxState = "IDLE";
   setRxState("IDLE");
-  rxBitBuffer    = [];
-  preambleWindow = [];
-  graphData      = [];
+  rxBitBuffer         = [];
+  preambleWindow      = [];
+  graphData           = [];
+  brightnessBuffer    = [];
+  debugBitLog         = [];
+  rawBrightnessHistory = [];
+  edgeConfirmCounter  = 0;
 
   btnRxStart.classList.remove("hidden");
   btnRxStop.classList.add("hidden");
@@ -618,7 +674,8 @@ function startBrightnessLoop() {
     if (!rxLoopActive) return;
 
     if (rxVideo.readyState >= 2) { // HAVE_CURRENT_DATA
-      currentBrightness = extractRoiBrightness();
+      const rawBrightness = extractRoiBrightness();
+      currentBrightness = medianFilter(rawBrightness);
 
       // Update UI stats
       statCurrent.textContent = Math.round(currentBrightness);
@@ -712,6 +769,7 @@ let lastBitValue = "0";  // Track last decided bit for hysteresis
 
 function startBitSampler() {
   samplerLoopActive = true;
+  edgeConfirmCounter = 0;
   if (sampleTimeout) clearTimeout(sampleTimeout);
   pollForEdge();
 }
@@ -731,12 +789,21 @@ function pollForEdge() {
     lastBitValue = bit;
     
     if (bit === "1") {
-       // EDGE DETECTED!
-       processBit("1"); // the first bit of the preamble
-       // Wait 1.5 bit periods to sample exactly in the middle of the NEXT bit
-       sampleTimeout = setTimeout(readSynchronizedBit, BIT_RATE_MS * 1.5);
+       edgeConfirmCounter++;
+       if (edgeConfirmCounter >= EDGE_CONFIRM_COUNT) {
+         // CONFIRMED EDGE — sustained bright signal, not a camera glitch
+         edgeConfirmCounter = 0;
+         addDebugBit("1", currentBrightness, threshold, 100, "EDGE");
+         processBit("1"); // the first bit of the preamble
+         // Wait 1.5 bit periods to sample in the middle of the NEXT bit
+         sampleTimeout = setTimeout(readSynchronizedBit, BIT_RATE_MS * 1.5);
+         return;
+       }
+       // Still confirming edge, keep polling
+       sampleTimeout = setTimeout(pollForEdge, 10);
        return;
     } else {
+       edgeConfirmCounter = 0; // Reset — must be consecutive bright readings
        // Slowly drift ambient baseline
        ambientBaseline = EMA_ALPHA * currentBrightness + (1 - EMA_ALPHA) * ambientBaseline;
        threshold       = ambientBaseline + THRESHOLD_OFFSET;
@@ -783,6 +850,9 @@ function readSynchronizedBit() {
   lastBitConfidence = Math.min(100, Math.round((absDistance / THRESHOLD_OFFSET) * 100));
   statConfidence.textContent = lastBitConfidence + "%";
 
+  // Debug: record every bit with full metadata
+  addDebugBit(bit, currentBrightness, threshold, lastBitConfidence, rxState);
+
   processBit(bit);
 
   if (rxState === "SCANNING") {
@@ -817,6 +887,7 @@ function forceDecodeAndStop(reason) {
   if (payloadBits.length >= 16) {
     log("rx-log", `${reason}: Decoding ${payloadBits.length} bits`, "err");
     decodePayload(payloadBits);
+    renderDebugLog();
   } else {
     log("rx-log", `${reason}: Not enough bits to decode (${payloadBits.length})`, "err");
   }
@@ -903,6 +974,7 @@ function processBit(bit) {
 
         log("rx-log", `★ POSTAMBLE DETECTED [${POSTAMBLE}] — Payload: ${payloadBits.length} bits`, "ok");
         decodePayload(payloadBits);
+        renderDebugLog();
 
         // ── AUTO-STOP: Go to COMPLETE state ──
         setRxState("COMPLETE");
@@ -949,7 +1021,7 @@ function updateLiveDecode() {
     }
     
     // Debug output format
-    dbgHTML += `<div style="font-size:11px; margin-bottom: 2px;"><code><span style="color:var(--amber);">${b1}</span> <span style="color:var(--amber-dim);">${b2}</span></code> <span style="color:var(--text-dim);">→</span> <strong style="color:var(--cyan);">${char === ' ' ? 'SPACE' : char}</strong></div>`;
+    dbgHTML += `<div style="font-size:11px; margin-bottom: 2px;"><code><span style="color:var(--amber);">${b1}</span> <span style="color:var(--amber-dim);">${b2}</span></code> <span style="color:var(--text-dim);">→</span> <strong style="color:var(--cyan);">${char === '~' ? 'SPACE(~)' : (char === ' ' ? 'SPACE' : char)}</strong></div>`;
   }
   
   if (remainingBits > 0) {
@@ -973,27 +1045,30 @@ function updateLiveDecode() {
 function decodePayload(bits) {
   const decoded = binaryToText(bits);
   
+  // Restore spaces from wire encoding (~ was used as space substitute during TX)
+  const rawText = decoded.message;
+  const text = rawText.replace(/~/g, ' ');
+  
   if (decoded.error) {
-    log("rx-log", `✗ Decode Error: ${decoded.message}`, "err");
+    log("rx-log", `⚠ Decoded with ${decoded.details.length} conflict(s): "${text}"`, "err");
     decoded.details.forEach(detail => log("rx-log", `  - ${detail}`, "err"));
+    if (rawText !== text) log("rx-log", `Wire: "${rawText}" → "${text}" (~ → space)`, "info");
     
-    // Update main decoded output to show the conflict details
-    const conflictHTML = `<div style="color:var(--red);"><strong>${decoded.message}</strong></div>` + 
-                         decoded.details.map(d => `<div style="font-size:11px; margin-top:4px;">${escapeHtml(d)}</div>`).join("");
-    decodedOutput.innerHTML = conflictHTML;
+    // Show recovered text with conflict warning (best-effort decode)
+    decodedOutput.innerHTML = `<div>${escapeHtml(text)}</div><div style="color:var(--amber); font-size:11px; margin-top:6px;">⚠ ${decoded.details.length} bit conflict(s) — text may contain errors</div>`;
     decodedOutput.classList.add("flash");
     setTimeout(() => decodedOutput.classList.remove("flash"), 2000);
     
-    // Update signal
-    setSignal("error", "RX ERROR");
-    updateBanner("error", `✗ DECODE FAILED: STREAM CONFLICTED`, "⚠");
+    setSignal("busy", "RX WARN");
+    updateBanner("done", `⚠ RECEIVED WITH ERRORS: "${text.length > 30 ? text.slice(0,30) + '…' : text}"`, "⚠");
     
     messageCount++;
-    addToMessageHistory("[ERROR] STREAM CONFLICTED");
+    addToMessageHistory(text + " ⚠");
+    renderDebugLog();
     return;
   }
   
-  const text = decoded.message;
+  if (rawText !== text) log("rx-log", `Wire: "${rawText}" → "${text}" (~ → space)`, "info");
   log("rx-log", `✓ Decoded: "${text}" (${bits.length} bits → ${text.length} chars)`, "ok");
 
   // Update main decoded output
@@ -1002,7 +1077,7 @@ function decodePayload(bits) {
   setTimeout(() => decodedOutput.classList.remove("flash"), 2000);
 
   // Update live decode (final)
-  liveDecode.innerHTML = text;
+  liveDecode.innerHTML = escapeHtml(text);
 
   // Update signal
   setSignal("active", "MSG RX ✓");
@@ -1185,3 +1260,90 @@ function drawGraph() {
   graphCtx.fill();
   graphCtx.shadowBlur = 0;
 }
+
+// ─────────────────────────────────────────────
+//  DEBUG BITSTREAM LOG
+// ─────────────────────────────────────────────
+
+/** Record a bit decision with full metadata for the debug panel */
+function addDebugBit(bit, brightness, thresh, confidence, state) {
+  const now = new Date();
+  const ts = `${String(now.getHours()).padStart(2,"0")}:${String(now.getMinutes()).padStart(2,"0")}:${String(now.getSeconds()).padStart(2,"0")}.${String(now.getMilliseconds()).padStart(3,"0")}`;
+  debugBitLog.push({ ts, bit, brightness: Math.round(brightness), threshold: Math.round(thresh), confidence, state });
+}
+
+/** Render the debug bitstream panel with full analysis */
+function renderDebugLog() {
+  const container = document.getElementById("debug-log-content");
+  if (!container) return;
+
+  if (debugBitLog.length === 0) {
+    container.innerHTML = '<div class="dim">No bits received yet.</div>';
+    return;
+  }
+
+  let html = '<div class="debug-section-title">RAW BITSTREAM (' + debugBitLog.length + ' bits)</div>';
+  html += '<div class="debug-bitstream">';
+  debugBitLog.forEach(e => {
+    html += `<span class="debug-bit ${e.bit === '1' ? 'db1' : 'db0'}" title="B:${e.brightness} T:${e.threshold} C:${e.confidence}%">${e.bit}</span>`;
+  });
+  html += '</div>';
+
+  // Character breakdown — 8-bit blocks from READING-state bits only
+  const payloadBits = debugBitLog.filter(e => e.state === "READING").map(e => e.bit);
+  if (payloadBits.length >= 8) {
+    html += '<div class="debug-section-title" style="margin-top:12px">CHARACTER BREAKDOWN (8-bit blocks)</div>';
+    html += '<div class="debug-chars">';
+    for (let i = 0; i < payloadBits.length; i += 8) {
+      const block = payloadBits.slice(i, i + 8);
+      if (block.length < 8) {
+        html += `<div class="debug-char-entry"><code class="debug-bits-partial">${block.join("")}... (${block.length}/8)</code></div>`;
+        break;
+      }
+      const byteStr = block.join("");
+      const charCode = parseInt(byteStr, 2);
+      let ch = "\u00B7"; // middle dot for non-printable
+      if (charCode >= 32 && charCode <= 126) ch = String.fromCharCode(charCode);
+      const displayCh = (ch === "~") ? "~ (SPACE)" : ch;
+      const blockNum = Math.floor(i / 8) + 1;
+      const isFirstOfPair = blockNum % 2 === 1;
+      const pairLabel = isFirstOfPair ? "BYTE-A" : "BYTE-B";
+      const matchClass = isFirstOfPair ? "odd" : "even";
+      html += `<div class="debug-char-entry ${matchClass}">` +
+        `<span class="debug-block-num">#${blockNum}</span>` +
+        `<span class="debug-pair-label">${pairLabel}</span> ` +
+        `<code class="debug-bits">${byteStr}</code> \u2192 ` +
+        `<strong class="debug-char">${escapeHtml(displayCh)}</strong> ` +
+        `<span class="debug-charcode">(0x${charCode.toString(16).toUpperCase().padStart(2,"0")})</span>` +
+        `</div>`;
+    }
+    html += '</div>';
+  }
+
+  // Detailed per-bit log table
+  html += '<div class="debug-section-title" style="margin-top:12px">DETAILED BIT LOG</div>';
+  html += '<div class="debug-table">';
+  html += '<div class="debug-row header"><span>TIME</span><span>BIT</span><span>BRIGHT</span><span>THRESH</span><span>CONF</span><span>STATE</span></div>';
+  debugBitLog.forEach(e => {
+    html += `<div class="debug-row"><span>${e.ts}</span><span class="${e.bit === '1' ? 'db1' : 'db0'}">${e.bit}</span><span>${e.brightness}</span><span>${e.threshold}</span><span>${e.confidence}%</span><span>${e.state}</span></div>`;
+  });
+  html += '</div>';
+
+  container.innerHTML = html;
+  container.scrollTop = container.scrollHeight;
+}
+
+// Debug panel toggle
+document.getElementById("btn-debug-toggle")?.addEventListener("click", () => {
+  const section = document.getElementById("debug-log-section");
+  const btn = document.getElementById("btn-debug-toggle");
+  if (!section || !btn) return;
+  if (section.classList.contains("hidden")) {
+    section.classList.remove("hidden");
+    btn.textContent = "HIDE";
+    renderDebugLog();
+  } else {
+    section.classList.add("hidden");
+    btn.textContent = "SHOW";
+  }
+});
