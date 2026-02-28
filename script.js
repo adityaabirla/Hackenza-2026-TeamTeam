@@ -143,6 +143,23 @@ function hammingDistance(a, b) {
   return d;
 }
 
+/**
+ * BIT-LEVEL MAJORITY VOTE
+ * For each bit position (0-7), take the majority value across 3 copies.
+ * Returns { voted: "01001000", flips: 2 } where flips = number of bit
+ * positions where at least one copy disagreed.
+ */
+function bitMajorityVote(a, b, c) {
+  let voted = "";
+  let flips = 0;
+  for (let i = 0; i < 8; i++) {
+    const sum = Number(a[i]) + Number(b[i]) + Number(c[i]);
+    voted += sum >= 2 ? "1" : "0";
+    if (!(a[i] === b[i] && b[i] === c[i])) flips++;
+  }
+  return { voted, flips };
+}
+
 /** Convert a string to its ASCII binary representation.
  *  Each character → 24-bit binary string (8-bit block × 3 copies for triple redundancy).
  */
@@ -170,30 +187,27 @@ function binaryToText(binary) {
     const b3 = trimmed.slice(i + 16, i + 24);
     const charIdx = i / BITS_PER_CHAR + 1;
 
-    let chosen;
-    if (b1 === b2 && b2 === b3) {
-      // Perfect — all 3 copies match
-      chosen = b1;
-    } else if (b1 === b2) {
-      chosen = b1;
-      correctedCount++;
-      conflictDetails.push(`Char ${charIdx}: Copy C differs (${b3}), corrected to ${b1}`);
-    } else if (b1 === b3) {
-      chosen = b1;
-      correctedCount++;
-      conflictDetails.push(`Char ${charIdx}: Copy B differs (${b2}), corrected to ${b1}`);
-    } else if (b2 === b3) {
-      chosen = b2;
-      correctedCount++;
-      conflictDetails.push(`Char ${charIdx}: Copy A differs (${b1}), corrected to ${b2}`);
+    // Bit-level majority voting: for each of the 8 bit positions,
+    // take the value that appears in at least 2 of the 3 copies.
+    const { voted, flips } = bitMajorityVote(b1, b2, b3);
+
+    if (flips === 0) {
+      // Perfect — all 3 copies agree on every bit
     } else {
-      // All three different — use copy B (middle) as fallback
-      chosen = b2;
-      hasUncorrectable = true;
-      conflictDetails.push(`Char ${charIdx}: ALL 3 DIFFER (${b1}/${b2}/${b3}), using B`);
+      correctedCount++;
+      conflictDetails.push(
+        `Char ${charIdx}: ${flips} bit(s) corrected via majority vote. A=${b1} B=${b2} C=${b3} → ${voted}`
+      );
+      // If majority vote result doesn't match ANY copy, flag it
+      if (voted !== b1 && voted !== b2 && voted !== b3) {
+        hasUncorrectable = true;
+        conflictDetails.push(
+          `Char ${charIdx}: Voted result ${voted} differs from all 3 copies — errors in different bit positions`
+        );
+      }
     }
 
-    result += String.fromCharCode(parseInt(chosen, 2));
+    result += String.fromCharCode(parseInt(voted, 2));
   }
 
   return {
@@ -1106,29 +1120,19 @@ function updateLiveDecode() {
     let status = "✓";
     let statusColor = "var(--green)";
 
-    if (b1 === b2 && b2 === b3) {
-      // All three agree — perfect
-      const code = parseInt(b1, 2);
-      char = (code >= 32 && code <= 126) ? String.fromCharCode(code) : "·";
+    // Bit-level majority voting across 3 copies
+    const { voted, flips } = bitMajorityVote(b1, b2, b3);
+    const code = parseInt(voted, 2);
+    char = (code >= 32 && code <= 126) ? String.fromCharCode(code) : "·";
+
+    if (flips === 0) {
       status = "✓";
       statusColor = "var(--green)";
-    } else if (b1 === b2 || b1 === b3) {
-      // b1 wins majority
-      const code = parseInt(b1, 2);
-      char = (code >= 32 && code <= 126) ? String.fromCharCode(code) : "·";
-      status = "⚠ corrected";
-      statusColor = "var(--amber)";
-    } else if (b2 === b3) {
-      // b2/b3 majority
-      const code = parseInt(b2, 2);
-      char = (code >= 32 && code <= 126) ? String.fromCharCode(code) : "·";
-      status = "⚠ corrected";
+    } else if (flips <= 2) {
+      status = `⚠ ${flips} bit(s) fixed`;
       statusColor = "var(--amber)";
     } else {
-      // All different — use b2 (middle copy)
-      const code = parseInt(b2, 2);
-      char = (code >= 32 && code <= 126) ? String.fromCharCode(code) : "·";
-      status = "✗ all differ";
+      status = `✗ ${flips} bit(s) fixed`;
       statusColor = "var(--red)";
     }
 
@@ -1421,15 +1425,15 @@ function renderDebugLog() {
       const copyB = payloadBits.slice(offset + 8, offset + 16).join("");
       const copyC = payloadBits.slice(offset + 16, offset + 24).join("");
 
-      let votedByte, voteLabel, voteClass;
-      if (copyA === copyB && copyB === copyC) {
-        votedByte = copyA; voteLabel = "PERFECT"; voteClass = "vote-ok";
-      } else if (copyA === copyB || copyA === copyC) {
-        votedByte = copyA; voteLabel = "CORRECTED"; voteClass = "vote-fix";
-      } else if (copyB === copyC) {
-        votedByte = copyB; voteLabel = "CORRECTED"; voteClass = "vote-fix";
+      // Bit-level majority voting
+      const { voted: votedByte, flips: voteFlips } = bitMajorityVote(copyA, copyB, copyC);
+      let voteLabel, voteClass;
+      if (voteFlips === 0) {
+        voteLabel = "PERFECT"; voteClass = "vote-ok";
+      } else if (voteFlips <= 2) {
+        voteLabel = `${voteFlips} BIT(S) FIXED`; voteClass = "vote-fix";
       } else {
-        votedByte = copyB; voteLabel = "ALL DIFFER"; voteClass = "vote-err";
+        voteLabel = `${voteFlips} BIT(S) FIXED`; voteClass = "vote-err";
       }
 
       const charCode = parseInt(votedByte, 2);
