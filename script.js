@@ -54,6 +54,9 @@ const EMA_ALPHA          = 0.02;    // exponential moving average coefficient fo
 const SPACE_CHAR         = "~";     // substitute for space during OOK (avoids long zero runs)
 const BRIGHTNESS_BUFFER_SIZE = 7;   // median filter window (odd number for clean median)
 const EDGE_CONFIRM_COUNT = 3;       // consecutive bright samples needed to confirm a real edge
+const BITS_PER_CHAR      = 24;      // 3 copies × 8 bits (triple redundancy for error correction)
+const PREAMBLE_TOLERANCE = 1;       // Hamming distance tolerance for preamble matching
+const MAX_SCAN_BITS      = 30;      // Max bits to sample in scanning before resetting edge detection
 
 // ─────────────────────────────────────────────
 //  BOOT ANIMATION
@@ -131,46 +134,74 @@ function medianFilter(raw) {
   return sorted[Math.floor(sorted.length / 2)];
 }
 
+/** Compute Hamming distance between two equal-length bit strings */
+function hammingDistance(a, b) {
+  let d = 0;
+  for (let i = 0; i < Math.min(a.length, b.length); i++) {
+    if (a[i] !== b[i]) d++;
+  }
+  return d;
+}
+
 /** Convert a string to its ASCII binary representation.
- *  Each character → 16-bit binary string (duplicated 8-bit block).
- *  Example: "Hi" → "0100100001001000..."
+ *  Each character → 24-bit binary string (8-bit block × 3 copies for triple redundancy).
  */
 function textToBinary(text) {
   return text.split("").map(ch => {
     const b = ch.charCodeAt(0).toString(2).padStart(8, "0");
-    return b + b; // duplicate the block for error reduction
+    return b + b + b; // triple redundancy (3 copies per character)
   }).join("");
 }
 
 /** Convert a binary string back to ASCII text.
- *  Processes 16 bits at a time (duplicated 8 bits).
+ *  Processes 24 bits at a time (3 × 8-bit copies — triple redundancy).
+ *  Majority voting: if 2+ copies agree → use that. All 3 differ → use copy B.
  */
 function binaryToText(binary) {
-  // Trim to a multiple of 16
-  const trimmed = binary.slice(0, Math.floor(binary.length / 16) * 16);
+  const trimmed = binary.slice(0, Math.floor(binary.length / BITS_PER_CHAR) * BITS_PER_CHAR);
   let result = "";
-  let errorFound = false;
+  let hasUncorrectable = false;
+  let correctedCount = 0;
   let conflictDetails = [];
 
-  for (let i = 0; i < trimmed.length; i += 16) {
-    const byte1 = trimmed.slice(i, i + 8);
-    const byte2 = trimmed.slice(i + 8, i + 16);
-    if (byte1 === byte2) {
-      result += String.fromCharCode(parseInt(byte1, 2));
+  for (let i = 0; i < trimmed.length; i += BITS_PER_CHAR) {
+    const b1 = trimmed.slice(i, i + 8);
+    const b2 = trimmed.slice(i + 8, i + 16);
+    const b3 = trimmed.slice(i + 16, i + 24);
+    const charIdx = i / BITS_PER_CHAR + 1;
+
+    let chosen;
+    if (b1 === b2 && b2 === b3) {
+      // Perfect — all 3 copies match
+      chosen = b1;
+    } else if (b1 === b2) {
+      chosen = b1;
+      correctedCount++;
+      conflictDetails.push(`Char ${charIdx}: Copy C differs (${b3}), corrected to ${b1}`);
+    } else if (b1 === b3) {
+      chosen = b1;
+      correctedCount++;
+      conflictDetails.push(`Char ${charIdx}: Copy B differs (${b2}), corrected to ${b1}`);
+    } else if (b2 === b3) {
+      chosen = b2;
+      correctedCount++;
+      conflictDetails.push(`Char ${charIdx}: Copy A differs (${b1}), corrected to ${b2}`);
     } else {
-      errorFound = true;
-      const char1 = String.fromCharCode(parseInt(byte1, 2));
-      const char2 = String.fromCharCode(parseInt(byte2, 2));
-      conflictDetails.push(`Block ${i / 16 + 1}: ${byte1} ('${char1}') vs ${byte2} ('${char2}')`);
-      // Best-effort recovery: use first byte (earlier sample, less drift-affected)
-      result += char1;
+      // All three different — use copy B (middle) as fallback
+      chosen = b2;
+      hasUncorrectable = true;
+      conflictDetails.push(`Char ${charIdx}: ALL 3 DIFFER (${b1}/${b2}/${b3}), using B`);
     }
+
+    result += String.fromCharCode(parseInt(chosen, 2));
   }
 
-  if (errorFound) {
-    return { error: true, message: result, details: conflictDetails };
-  }
-  return { error: false, message: result };
+  return {
+    error: hasUncorrectable,
+    corrected: correctedCount,
+    message: result,
+    details: conflictDetails
+  };
 }
 
 /** Append a timestamped entry to a log element */
@@ -242,10 +273,11 @@ btnConvert.addEventListener("click", () => {
   for (let i = 0; i < wireText.length; i++) {
     const char = wireText[i];
     const origChar = text[i] || '';
-    const bin1 = binary.substr(i * 16, 8);
-    const bin2 = binary.substr(i * 16 + 8, 8);
+    const bin1 = binary.substr(i * BITS_PER_CHAR, 8);
+    const bin2 = binary.substr(i * BITS_PER_CHAR + 8, 8);
+    const bin3 = binary.substr(i * BITS_PER_CHAR + 16, 8);
     const displayChar = origChar === ' ' ? 'SPACE→~' : char;
-    dbgHTML += `<div style="margin-bottom: 4px; font-size: 11px;"><code>${bin1} ${bin2}</code> <span style="color:var(--text-dim);">→</span> <strong style="color:var(--cyan);">${displayChar}</strong></div>`;
+    dbgHTML += `<div style="margin-bottom: 4px; font-size: 11px;"><code>${bin1} ${bin2} ${bin3}</code> <span style="color:var(--text-dim);">→</span> <strong style="color:var(--cyan);">${displayChar}</strong> <span style="color:var(--green);font-size:9px">(3×)</span></div>`;
   }
   binaryDisplay.innerHTML = dbgHTML;
 
@@ -440,11 +472,14 @@ let lastBitConfidence = 0;      // Confidence of last bit decision (0-100)
 let edgeConfirmCounter = 0;     // Counter for confirmed consecutive bright readings
 let debugBitLog = [];           // Full debug log of every bit with metadata
 let rawBrightnessHistory = [];  // Unfiltered brightness values for debug
+let bitPeriodSamples = [];      // Recent brightness readings for multi-sample voting
+let scanBitsSinceEdge = 0;      // Bits sampled since last edge detection
+let fallingEdgeTimer = 0;       // Timer for falling edge detection timeout
 
 // Robustness constants
 const MULTI_SAMPLE_COUNT  = 5;      // Sub-samples per bit period for majority voting
 const MULTI_SAMPLE_DELAY  = 40;     // ms between sub-samples (5 × 40ms = 200ms in 300ms window)
-const MAX_PAYLOAD_BITS    = 2400;   // Max payload before forced timeout (150 chars × 16)
+const MAX_PAYLOAD_BITS    = 3600;   // Max payload before forced timeout (150 chars × 24)
 const READING_TIMEOUT_MS  = 60000;  // 60s max reading time before forced stop
 const HYSTERESIS_BAND     = 8;      // Brightness units for hysteresis (prevents flicker at threshold)
 
@@ -562,6 +597,9 @@ async function startReceiver() {
   debugBitLog         = [];
   rawBrightnessHistory = [];
   edgeConfirmCounter  = 0;
+  bitPeriodSamples    = [];
+  scanBitsSinceEdge   = 0;
+  fallingEdgeTimer    = 0;
 
   // Start 60fps brightness sampling loop (for graph & calibration)
   startBrightnessLoop();
@@ -594,6 +632,9 @@ function stopReceiver() {
   debugBitLog         = [];
   rawBrightnessHistory = [];
   edgeConfirmCounter  = 0;
+  bitPeriodSamples    = [];
+  scanBitsSinceEdge   = 0;
+  fallingEdgeTimer    = 0;
 
   btnRxStart.classList.remove("hidden");
   btnRxStop.classList.add("hidden");
@@ -680,6 +721,10 @@ function startBrightnessLoop() {
       // Update UI stats
       statCurrent.textContent = Math.round(currentBrightness);
 
+      // Accumulate samples for multi-sample voting in bit sampler
+      bitPeriodSamples.push(currentBrightness);
+      if (bitPeriodSamples.length > 30) bitPeriodSamples.shift();
+
       // Add to graph history
       graphData.push(currentBrightness);
       if (graphData.length > GRAPH_HISTORY) graphData.shift();
@@ -748,21 +793,20 @@ async function runCalibration() {
 // ─────────────────────────────────────────────
 
 /**
- * BIT SAMPLER (IMPROVED — Multi-sample majority voting)
+ * BIT SAMPLER (OVERHAULED — Falling-edge sync + Multi-sample voting)
  *
- * Instead of taking a single brightness sample per bit period,
- * we take MULTI_SAMPLE_COUNT (5) sub-samples spaced across the
- * bit window, then use majority voting to decide 0 or 1.
- *
- * This dramatically reduces errors from:
- *   - Sampling at bit transition edges
- *   - Brief camera noise spikes
- *   - Slight timing drift between sender and receiver
- *
- * Additionally includes:
- *   - Hysteresis band to prevent flickering near threshold
- *   - Timeout guard for stuck READING state
- *   - Confidence metric per bit
+ * KEY IMPROVEMENTS:
+ *   1. FALLING EDGE SYNC: After detecting a rising edge, we wait for
+ *      brightness to DROP below threshold. This precisely identifies the
+ *      1→0 transition boundary, giving us an accurate clock reference.
+ *      We then center-sample 0.5×BIT_RATE later.
+ *   2. MULTI-SAMPLE VOTING: Instead of reading currentBrightness once,
+ *      we look at all brightness samples from the 60fps loop collected
+ *      during the bit period and majority-vote.
+ *   3. HAMMING-TOLERANT PREAMBLE: Allow 1 bit error in preamble matching
+ *      (see processBit). This dramatically reduces missed preambles.
+ *   4. GRACEFUL SCANNING: On preamble mismatch, keep sampling instead of
+ *      immediately resetting to edge polling.
  */
 
 let lastBitValue = "0";  // Track last decided bit for hysteresis
@@ -770,6 +814,8 @@ let lastBitValue = "0";  // Track last decided bit for hysteresis
 function startBitSampler() {
   samplerLoopActive = true;
   edgeConfirmCounter = 0;
+  scanBitsSinceEdge = 0;
+  bitPeriodSamples = [];
   if (sampleTimeout) clearTimeout(sampleTimeout);
   pollForEdge();
 }
@@ -781,52 +827,123 @@ function pollForEdge() {
      return;
   }
 
-  // If we are SCANNING, look for an edge
   if (rxState === "SCANNING") {
-    const distFromThreshold = currentBrightness - threshold;
-    const absDistance = Math.abs(distFromThreshold);
-    let bit = (absDistance < HYSTERESIS_BAND) ? lastBitValue : (currentBrightness > threshold ? "1" : "0");
-    lastBitValue = bit;
-    
-    if (bit === "1") {
+    const isAbove = currentBrightness > threshold + HYSTERESIS_BAND;
+
+    if (isAbove) {
        edgeConfirmCounter++;
        if (edgeConfirmCounter >= EDGE_CONFIRM_COUNT) {
-         // CONFIRMED EDGE — sustained bright signal, not a camera glitch
+         // CONFIRMED rising edge — sustained bright signal
          edgeConfirmCounter = 0;
-         addDebugBit("1", currentBrightness, threshold, 100, "EDGE");
-         processBit("1"); // the first bit of the preamble
-         // Wait 1.5 bit periods to sample in the middle of the NEXT bit
-         sampleTimeout = setTimeout(readSynchronizedBit, BIT_RATE_MS * 1.5);
+         log("rx-log", "Rising edge confirmed. Syncing to bit clock...", "info");
+         fallingEdgeTimer = 0;
+         waitForFallingEdge();
          return;
        }
-       // Still confirming edge, keep polling
        sampleTimeout = setTimeout(pollForEdge, 10);
        return;
     } else {
-       edgeConfirmCounter = 0; // Reset — must be consecutive bright readings
+       edgeConfirmCounter = 0;
        // Slowly drift ambient baseline
        ambientBaseline = EMA_ALPHA * currentBrightness + (1 - EMA_ALPHA) * ambientBaseline;
        threshold       = ambientBaseline + THRESHOLD_OFFSET;
        statThreshold.textContent = Math.round(threshold);
-       
-       sampleTimeout = setTimeout(pollForEdge, 10); // Check very aggressively for an edge
+       sampleTimeout = setTimeout(pollForEdge, 10);
        return;
     }
   } else if (rxState === "READING") {
-      // Should normally be handled in readSynchronizedBit
-      sampleTimeout = setTimeout(pollForEdge, BIT_RATE_MS);
+      sampleTimeout = setTimeout(readBitWithVoting, BIT_RATE_MS);
   }
 }
 
-function readSynchronizedBit() {
+/**
+ * FALLING EDGE SYNC
+ * After detecting a rising edge (first "1" of preamble), wait for
+ * brightness to drop below threshold. This precisely identifies the
+ * 1→0 transition boundary for accurate clock synchronisation.
+ * Then center-sample 0.5×BIT_RATE later for the next bit.
+ */
+function waitForFallingEdge() {
   if (!samplerLoopActive) return;
+  fallingEdgeTimer += 10;
 
-  if (rxState !== "READING" && rxState !== "SCANNING") {
-      pollForEdge();
-      return;
+  if (currentBrightness < threshold - HYSTERESIS_BAND) {
+    // Found falling edge — we're at the 1→0 boundary
+    fallingEdgeTimer = 0;
+    preambleWindow = ["1"];
+    scanBitsSinceEdge = 1;
+    addDebugBit("1", currentBrightness, threshold, 100, "SYNC");
+    bitPeriodSamples = []; // Clear for fresh bit-period sampling
+    // Wait 0.5 × BIT_RATE to land in center of the "0" bit
+    sampleTimeout = setTimeout(readBitWithVoting, Math.floor(BIT_RATE_MS * 0.5));
+    return;
   }
 
-  // ── TIMEOUT GUARD ──
+  // Timeout: if brightness doesn't drop after 3 bit periods, reset
+  if (fallingEdgeTimer >= BIT_RATE_MS * 3) {
+    fallingEdgeTimer = 0;
+    log("rx-log", "Falling edge timeout — light stayed on. Resetting scan...", "info");
+    edgeConfirmCounter = 0;
+    pollForEdge();
+    return;
+  }
+
+  sampleTimeout = setTimeout(waitForFallingEdge, 10);
+}
+
+/**
+ * READ BIT WITH VOTING
+ * Uses multi-sample majority voting from the 60fps brightness loop.
+ * Instead of reading a single currentBrightness value, it looks at
+ * all brightness samples collected during the bit period and votes.
+ * This is dramatically more robust against noise, camera glitches,
+ * and sampling at bit-transition edges.
+ */
+function readBitWithVoting() {
+  if (!samplerLoopActive) return;
+  if (rxState === "COMPLETE" || rxState === "IDLE" || rxState === "CALIBRATING") {
+    pollForEdge();
+    return;
+  }
+
+  // Multi-sample voting: use recent brightness readings from 60fps loop
+  const samplesToUse = Math.min(bitPeriodSamples.length, 12);
+  let bit, confidence;
+
+  if (samplesToUse >= 3) {
+    const recent = bitPeriodSamples.slice(-samplesToUse);
+    const aboveCount = recent.filter(v => v > threshold).length;
+    bit = aboveCount > samplesToUse / 2 ? "1" : "0";
+    confidence = Math.round(Math.max(aboveCount, samplesToUse - aboveCount) / samplesToUse * 100);
+  } else {
+    // Not enough samples — fall back to single reading with hysteresis
+    const dist = currentBrightness - threshold;
+    bit = Math.abs(dist) < HYSTERESIS_BAND ? lastBitValue : (dist > 0 ? "1" : "0");
+    confidence = Math.min(100, Math.round(Math.abs(dist) / THRESHOLD_OFFSET * 100));
+  }
+
+  lastBitValue = bit;
+  lastBitConfidence = confidence;
+  statConfidence.textContent = confidence + "%";
+  bitPeriodSamples = []; // Clear for next bit period
+
+  addDebugBit(bit, currentBrightness, threshold, confidence, rxState);
+  processBit(bit);
+
+  // Scanning guard: reset to edge polling after too many bits without preamble
+  if (rxState === "SCANNING") {
+    scanBitsSinceEdge++;
+    if (scanBitsSinceEdge > MAX_SCAN_BITS) {
+      log("rx-log", `No preamble after ${MAX_SCAN_BITS} bits. Resetting edge scan...`, "info");
+      preambleWindow = [];
+      scanBitsSinceEdge = 0;
+      edgeConfirmCounter = 0;
+      pollForEdge();
+      return;
+    }
+  }
+
+  // Reading guards
   if (rxState === "READING") {
     const elapsed = Date.now() - readingStartTime;
     if (elapsed > READING_TIMEOUT_MS) {
@@ -841,37 +958,12 @@ function readSynchronizedBit() {
     }
   }
 
-  const distFromThreshold = currentBrightness - threshold;
-  const absDistance = Math.abs(distFromThreshold);
-  let bit = (absDistance < HYSTERESIS_BAND) ? lastBitValue : (currentBrightness > threshold ? "1" : "0");
-  lastBitValue = bit;
-
-  // Track confidence
-  lastBitConfidence = Math.min(100, Math.round((absDistance / THRESHOLD_OFFSET) * 100));
-  statConfidence.textContent = lastBitConfidence + "%";
-
-  // Debug: record every bit with full metadata
-  addDebugBit(bit, currentBrightness, threshold, lastBitConfidence, rxState);
-
-  processBit(bit);
-
-  if (rxState === "SCANNING") {
-     // If we gathered 6 bits and it's NOT the preamble, our edge might have been noise.
-     if (preambleWindow.length === PREAMBLE.length && preambleWindow.join("") !== PREAMBLE) {
-         preambleWindow = []; // clear window
-         log("rx-log", "Edge false alarm. Resuming scan...", "info");
-         pollForEdge(); // Reset edge detection
-         return;
-     }
-  }
-
   if (rxState === "COMPLETE" || rxState === "IDLE") {
-     pollForEdge(); 
-     return;
+    pollForEdge();
+    return;
   }
-  
-  // Wait exactly 1 bit period for the next bit center
-  sampleTimeout = setTimeout(readSynchronizedBit, BIT_RATE_MS);
+
+  sampleTimeout = setTimeout(readBitWithVoting, BIT_RATE_MS);
 }
 
 /**
@@ -884,7 +976,7 @@ function forceDecodeAndStop(reason) {
   samplerLoopActive = false;
 
   const payloadBits = rxBitBuffer.join("");
-  if (payloadBits.length >= 16) {
+  if (payloadBits.length >= BITS_PER_CHAR) {
     log("rx-log", `${reason}: Decoding ${payloadBits.length} bits`, "err");
     decodePayload(payloadBits);
     renderDebugLog();
@@ -923,9 +1015,10 @@ function processBit(bit) {
     updateBanner("scanning", `SCANNING FOR PREAMBLE... [${preambleWindow.join("")}]`, "◎");
 
     const windowStr = preambleWindow.join("");
-    if (windowStr === PREAMBLE) {
-      // ✓ Preamble detected! Transition to READING state.
-      log("rx-log", `★ PREAMBLE DETECTED [${PREAMBLE}] — Now reading data...`, "ok");
+    const hd = hammingDistance(windowStr, PREAMBLE);
+    if (hd <= PREAMBLE_TOLERANCE) {
+      // ✓ Preamble detected (Hamming distance ≤ tolerance)! Transition to READING state.
+      log("rx-log", `★ PREAMBLE DETECTED [${windowStr}] (HD=${hd}) — Now reading data...`, "ok");
       setRxState("READING");
       rxBitBuffer    = [];  // Clear buffer — ready to collect payload
       preambleWindow = [];  // Reset preamble window
@@ -935,7 +1028,7 @@ function processBit(bit) {
       // Reset live decode
       liveDecode.innerHTML = '<span class="cursor-blink"></span>';
       liveCharsCount.textContent = "0 chars";
-      liveBitsProgress.textContent = "next char: 0/16 bits";
+      liveBitsProgress.textContent = `next char: 0/${BITS_PER_CHAR} bits`;
       decodedOutput.innerHTML = '<span class="dim">Receiving data...</span>';
       updateBanner("reading", "★ PREAMBLE FOUND — RECEIVING DATA...", "⬤");
     }
@@ -952,15 +1045,15 @@ function processBit(bit) {
     updateLiveDecode();
 
     // Update banner with progress
-    const charsDone = Math.floor(rxBitBuffer.length / 16);
-    const bitsIntoChar = rxBitBuffer.length % 16;
+    const charsDone = Math.floor(rxBitBuffer.length / BITS_PER_CHAR);
+    const bitsIntoChar = rxBitBuffer.length % BITS_PER_CHAR;
     updateBanner("reading",
       `RECEIVING DATA — ${rxBitBuffer.length} bits (${charsDone} chars decoded)`,
       "⬤");
 
     // ── Check last 6 bits for postamble ──
-    // Only check if doing so leaves a payload that is an exact multiple of 16 bits!
-    if (rxBitBuffer.length >= POSTAMBLE.length && ((rxBitBuffer.length - POSTAMBLE.length) % 16 === 0)) {
+    // Only check if doing so leaves a payload that is an exact multiple of BITS_PER_CHAR bits!
+    if (rxBitBuffer.length >= POSTAMBLE.length && ((rxBitBuffer.length - POSTAMBLE.length) % BITS_PER_CHAR === 0)) {
       const tail = rxBitBuffer.slice(-POSTAMBLE.length).join("");
 
       if (tail === POSTAMBLE) {
@@ -993,52 +1086,76 @@ function processBit(bit) {
 }
 
 /**
- * LIVE DECODE
- * Shows characters as they are decoded in real-time, 16 bits at a time (duplicated 8 bits).
- * Also shows progress toward the next character.
+ * LIVE DECODE (TRIPLE REDUNDANCY)
+ * Shows characters as they are decoded in real-time, BITS_PER_CHAR (24) bits at a time.
+ * Each character is sent as 3×8 bits. We majority-vote the three copies.
  */
 function updateLiveDecode() {
   const totalBits = rxBitBuffer.length;
-  const fullChars = Math.floor(totalBits / 16);
-  const remainingBits = totalBits % 16;
+  const fullChars = Math.floor(totalBits / BITS_PER_CHAR);
+  const remainingBits = totalBits % BITS_PER_CHAR;
 
-  // Decode all complete characters
   let dbgHTML = "";
   for (let i = 0; i < fullChars; i++) {
-    const b1 = rxBitBuffer.slice(i * 16, i * 16 + 8).join("");
-    const b2 = rxBitBuffer.slice(i * 16 + 8, (i + 1) * 16).join("");
+    const offset = i * BITS_PER_CHAR;
+    const b1 = rxBitBuffer.slice(offset, offset + 8).join("");
+    const b2 = rxBitBuffer.slice(offset + 8, offset + 16).join("");
+    const b3 = rxBitBuffer.slice(offset + 16, offset + 24).join("");
+
     let char = "?";
-    
-    if (b1 === b2) {
-      const charCode = parseInt(b1, 2);
-      if (charCode >= 32 && charCode <= 126) {
-        char = String.fromCharCode(charCode);
-      } else {
-        char = "·"; // Non-printable
-      }
+    let status = "✓";
+    let statusColor = "var(--green)";
+
+    if (b1 === b2 && b2 === b3) {
+      // All three agree — perfect
+      const code = parseInt(b1, 2);
+      char = (code >= 32 && code <= 126) ? String.fromCharCode(code) : "·";
+      status = "✓";
+      statusColor = "var(--green)";
+    } else if (b1 === b2 || b1 === b3) {
+      // b1 wins majority
+      const code = parseInt(b1, 2);
+      char = (code >= 32 && code <= 126) ? String.fromCharCode(code) : "·";
+      status = "⚠ corrected";
+      statusColor = "var(--amber)";
+    } else if (b2 === b3) {
+      // b2/b3 majority
+      const code = parseInt(b2, 2);
+      char = (code >= 32 && code <= 126) ? String.fromCharCode(code) : "·";
+      status = "⚠ corrected";
+      statusColor = "var(--amber)";
     } else {
-      char = "⚠"; // Conflict
+      // All different — use b2 (middle copy)
+      const code = parseInt(b2, 2);
+      char = (code >= 32 && code <= 126) ? String.fromCharCode(code) : "·";
+      status = "✗ all differ";
+      statusColor = "var(--red)";
     }
-    
-    // Debug output format
-    dbgHTML += `<div style="font-size:11px; margin-bottom: 2px;"><code><span style="color:var(--amber);">${b1}</span> <span style="color:var(--amber-dim);">${b2}</span></code> <span style="color:var(--text-dim);">→</span> <strong style="color:var(--cyan);">${char === '~' ? 'SPACE(~)' : (char === ' ' ? 'SPACE' : char)}</strong></div>`;
-  }
-  
-  if (remainingBits > 0) {
-    const rem = rxBitBuffer.slice(fullChars * 16).join("");
-    dbgHTML += `<div style="font-size:11px; margin-bottom: 2px; color: var(--text-dim);"><code>${rem}...</code></div>`;
+
+    const displayChar = char === '~' ? 'SPACE(~)' : (char === ' ' ? 'SPACE' : char);
+    dbgHTML += `<div style="font-size:11px; margin-bottom: 2px;">` +
+      `<code><span style="color:var(--amber);">${b1}</span> ` +
+      `<span style="color:var(--amber-dim);">${b2}</span> ` +
+      `<span style="color:var(--text-dim);">${b3}</span></code> ` +
+      `<span style="color:${statusColor}; font-size:10px;">${status}</span> ` +
+      `<span style="color:var(--text-dim);">→</span> ` +
+      `<strong style="color:var(--cyan);">${displayChar}</strong></div>`;
   }
 
-  // Render with blinking cursor
+  if (remainingBits > 0) {
+    const rem = rxBitBuffer.slice(fullChars * BITS_PER_CHAR).join("");
+    dbgHTML += `<div style="font-size:11px; margin-bottom: 2px; color: var(--text-dim);"><code>${rem}...</code> (${remainingBits}/${BITS_PER_CHAR})</div>`;
+  }
+
   liveDecode.innerHTML = (dbgHTML || "") + '<span class="cursor-blink"></span>';
   liveCharsCount.textContent = fullChars + " chars";
-  liveBitsProgress.textContent = `next char: ${remainingBits}/16 bits`;
+  liveBitsProgress.textContent = `next char: ${remainingBits}/${BITS_PER_CHAR} bits`;
 }
 
 /**
- * DECODE PAYLOAD (IMPROVED)
+ * DECODE PAYLOAD (TRIPLE REDUNDANCY)
  * Convert the received binary payload back to ASCII text.
- * Add to message history. Show prominent completion UI.
+ * binaryToText now returns { error, corrected, message, details }.
  *
  * @param {string} bits - binary string of the payload (no preamble/postamble)
  */
@@ -1050,12 +1167,13 @@ function decodePayload(bits) {
   const text = rawText.replace(/~/g, ' ');
   
   if (decoded.error) {
-    log("rx-log", `⚠ Decoded with ${decoded.details.length} conflict(s): "${text}"`, "err");
+    const corrMsg = decoded.corrected > 0 ? ` (${decoded.corrected} corrected via voting)` : "";
+    log("rx-log", `⚠ Decoded with ${decoded.details.length} conflict(s)${corrMsg}: "${text}"`, "err");
     decoded.details.forEach(detail => log("rx-log", `  - ${detail}`, "err"));
     if (rawText !== text) log("rx-log", `Wire: "${rawText}" → "${text}" (~ → space)`, "info");
     
     // Show recovered text with conflict warning (best-effort decode)
-    decodedOutput.innerHTML = `<div>${escapeHtml(text)}</div><div style="color:var(--amber); font-size:11px; margin-top:6px;">⚠ ${decoded.details.length} bit conflict(s) — text may contain errors</div>`;
+    decodedOutput.innerHTML = `<div>${escapeHtml(text)}</div><div style="color:var(--amber); font-size:11px; margin-top:6px;">⚠ ${decoded.details.length} conflict(s), ${decoded.corrected} corrected via triple voting</div>`;
     decodedOutput.classList.add("flash");
     setTimeout(() => decodedOutput.classList.remove("flash"), 2000);
     
@@ -1069,7 +1187,8 @@ function decodePayload(bits) {
   }
   
   if (rawText !== text) log("rx-log", `Wire: "${rawText}" → "${text}" (~ → space)`, "info");
-  log("rx-log", `✓ Decoded: "${text}" (${bits.length} bits → ${text.length} chars)`, "ok");
+  const corrMsg = decoded.corrected > 0 ? ` — ${decoded.corrected} char(s) corrected via triple voting` : "";
+  log("rx-log", `✓ Decoded: "${text}" (${bits.length} bits → ${text.length} chars)${corrMsg}`, "ok");
 
   // Update main decoded output
   decodedOutput.textContent = text;
@@ -1289,33 +1408,53 @@ function renderDebugLog() {
   });
   html += '</div>';
 
-  // Character breakdown — 8-bit blocks from READING-state bits only
+  // Character breakdown — BITS_PER_CHAR (24-bit) blocks from READING-state bits only
+  // Each character = 3 × 8-bit copies: COPY A, COPY B, COPY C
   const payloadBits = debugBitLog.filter(e => e.state === "READING").map(e => e.bit);
   if (payloadBits.length >= 8) {
-    html += '<div class="debug-section-title" style="margin-top:12px">CHARACTER BREAKDOWN (8-bit blocks)</div>';
+    html += '<div class="debug-section-title" style="margin-top:12px">CHARACTER BREAKDOWN (3×8-bit triple redundancy)</div>';
     html += '<div class="debug-chars">';
-    for (let i = 0; i < payloadBits.length; i += 8) {
-      const block = payloadBits.slice(i, i + 8);
-      if (block.length < 8) {
-        html += `<div class="debug-char-entry"><code class="debug-bits-partial">${block.join("")}... (${block.length}/8)</code></div>`;
-        break;
+    const charCount = Math.floor(payloadBits.length / BITS_PER_CHAR);
+    for (let c = 0; c < charCount; c++) {
+      const offset = c * BITS_PER_CHAR;
+      const copyA = payloadBits.slice(offset, offset + 8).join("");
+      const copyB = payloadBits.slice(offset + 8, offset + 16).join("");
+      const copyC = payloadBits.slice(offset + 16, offset + 24).join("");
+
+      let votedByte, voteLabel, voteClass;
+      if (copyA === copyB && copyB === copyC) {
+        votedByte = copyA; voteLabel = "PERFECT"; voteClass = "vote-ok";
+      } else if (copyA === copyB || copyA === copyC) {
+        votedByte = copyA; voteLabel = "CORRECTED"; voteClass = "vote-fix";
+      } else if (copyB === copyC) {
+        votedByte = copyB; voteLabel = "CORRECTED"; voteClass = "vote-fix";
+      } else {
+        votedByte = copyB; voteLabel = "ALL DIFFER"; voteClass = "vote-err";
       }
-      const byteStr = block.join("");
-      const charCode = parseInt(byteStr, 2);
-      let ch = "\u00B7"; // middle dot for non-printable
+
+      const charCode = parseInt(votedByte, 2);
+      let ch = "\u00B7";
       if (charCode >= 32 && charCode <= 126) ch = String.fromCharCode(charCode);
       const displayCh = (ch === "~") ? "~ (SPACE)" : ch;
-      const blockNum = Math.floor(i / 8) + 1;
-      const isFirstOfPair = blockNum % 2 === 1;
-      const pairLabel = isFirstOfPair ? "BYTE-A" : "BYTE-B";
-      const matchClass = isFirstOfPair ? "odd" : "even";
-      html += `<div class="debug-char-entry ${matchClass}">` +
-        `<span class="debug-block-num">#${blockNum}</span>` +
-        `<span class="debug-pair-label">${pairLabel}</span> ` +
-        `<code class="debug-bits">${byteStr}</code> \u2192 ` +
-        `<strong class="debug-char">${escapeHtml(displayCh)}</strong> ` +
-        `<span class="debug-charcode">(0x${charCode.toString(16).toUpperCase().padStart(2,"0")})</span>` +
+      const charNum = c + 1;
+
+      html += `<div class="debug-char-entry" style="margin-bottom:6px; border-left:2px solid var(--border); padding-left:6px;">` +
+        `<div><span class="debug-block-num">CHAR #${charNum}</span> → ` +
+        `<strong class="debug-char" style="font-size:14px;">${escapeHtml(displayCh)}</strong> ` +
+        `<span class="debug-charcode">(0x${charCode.toString(16).toUpperCase().padStart(2,"0")})</span> ` +
+        `<span class="${voteClass}" style="font-size:10px; padding:1px 4px; border-radius:3px;">${voteLabel}</span></div>` +
+        `<div style="font-size:10px; margin-top:2px;">` +
+        `<span style="color:var(--amber);">A: ${copyA}</span>  ` +
+        `<span style="color:var(--amber-dim);">B: ${copyB}</span>  ` +
+        `<span style="color:var(--text-dim);">C: ${copyC}</span></div>` +
         `</div>`;
+    }
+
+    // Show remaining partial bits
+    const remaining = payloadBits.length - charCount * BITS_PER_CHAR;
+    if (remaining > 0) {
+      const rem = payloadBits.slice(charCount * BITS_PER_CHAR).join("");
+      html += `<div class="debug-char-entry"><code class="debug-bits-partial">${rem}... (${remaining}/${BITS_PER_CHAR})</code></div>`;
     }
     html += '</div>';
   }

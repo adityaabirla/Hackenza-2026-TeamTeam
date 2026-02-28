@@ -675,6 +675,9 @@ textarea::placeholder { color: var(--text-dim); }
 .debug-bits-partial { color: var(--text-dim); }
 .debug-char { color: var(--cyan); }
 .debug-charcode { font-size: 9px; color: var(--text-dim); }
+.vote-ok   { background: rgba(0,255,65,0.15); color: var(--green); }
+.vote-fix  { background: rgba(245,166,35,0.2); color: var(--amber); }
+.vote-err  { background: rgba(255,50,50,0.2); color: var(--red, #ff4444); }
 .debug-table {
   font-family: var(--font-mono);
   font-size: 9px;
