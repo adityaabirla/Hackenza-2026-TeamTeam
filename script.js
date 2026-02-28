@@ -134,9 +134,9 @@ function medianFilter(raw) {
   return sorted[Math.floor(sorted.length / 2)];
 }
 
-/** Compute Hamming distance between two equal-length bit strings */
+/** Compute Hamming distance between two bit strings (penalises length difference) */
 function hammingDistance(a, b) {
-  let d = 0;
+  let d = Math.abs(a.length - b.length); // unmatched positions count as mismatches
   for (let i = 0; i < Math.min(a.length, b.length); i++) {
     if (a[i] !== b[i]) d++;
   }
@@ -1071,23 +1071,26 @@ function processBit(bit) {
     updateBitBufferUI([...preambleWindow], "preamble");
     updateBanner("scanning", `SCANNING FOR PREAMBLE... [${preambleWindow.join("")}]`, "◎");
 
-    const windowStr = preambleWindow.join("");
-    const hd = hammingDistance(windowStr, PREAMBLE);
-    if (hd <= PREAMBLE_TOLERANCE) {
-      // ✓ Preamble detected (Hamming distance ≤ tolerance)! Transition to READING state.
-      log("rx-log", `★ PREAMBLE DETECTED [${windowStr}] (HD=${hd}) — Now reading data...`, "ok");
-      setRxState("READING");
-      rxBitBuffer    = [];  // Clear buffer — ready to collect payload
-      preambleWindow = [];  // Reset preamble window
-      readingStartTime = Date.now(); // Start timeout clock
-      reticleBox.classList.add("locked");
+    // Only check preamble when window is exactly full (6 bits)
+    if (preambleWindow.length === PREAMBLE.length) {
+      const windowStr = preambleWindow.join("");
+      const hd = hammingDistance(windowStr, PREAMBLE);
+      if (hd <= PREAMBLE_TOLERANCE) {
+        // ✓ Preamble detected (Hamming distance ≤ tolerance)! Transition to READING state.
+        log("rx-log", `★ PREAMBLE DETECTED [${windowStr}] (HD=${hd}) — Now reading data...`, "ok");
+        setRxState("READING");
+        rxBitBuffer    = [];  // Clear buffer — ready to collect payload
+        preambleWindow = [];  // Reset preamble window
+        readingStartTime = Date.now(); // Start timeout clock
+        reticleBox.classList.add("locked");
 
-      // Reset live decode
-      liveDecode.innerHTML = '<span class="cursor-blink"></span>';
-      liveCharsCount.textContent = "0 chars";
-      liveBitsProgress.textContent = `next char: 0/${BITS_PER_CHAR} bits`;
-      decodedOutput.innerHTML = '<span class="dim">Receiving data...</span>';
-      updateBanner("reading", "★ PREAMBLE FOUND — RECEIVING DATA...", "⬤");
+        // Reset live decode
+        liveDecode.innerHTML = '<span class="cursor-blink"></span>';
+        liveCharsCount.textContent = "0 chars";
+        liveBitsProgress.textContent = `next char: 0/${BITS_PER_CHAR} bits`;
+        decodedOutput.innerHTML = '<span class="dim">Receiving data...</span>';
+        updateBanner("reading", "★ PREAMBLE FOUND — RECEIVING DATA...", "⬤");
+      }
     }
     return;
   }
