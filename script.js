@@ -1,40 +1,7 @@
 /**
  * ============================================================
- *  LI-FI OWC TERMINAL — script.js
- *  Optical Wireless Communication via On-Off Keying (OOK)
- * ============================================================
- *
- *  PROTOCOL SUMMARY
- *  ─────────────────
- *  Bit rate  : 300ms per bit  (~3.3 bits/sec — slow for reliability)
- *  Preamble  : "101011"       (6-bit start-of-frame marker)
- *  Postamble : "000000"       (6-bit end-of-frame marker)
- *  Encoding  : OOK
- *              Logic 1  →  Light ON  (torch or white screen)
- *              Logic 0  →  Light OFF (torch off or black screen)
- *
- *  RECEIVER STATE MACHINE
- *  ───────────────────────
- *  IDLE  →  CALIBRATING  →  SCANNING  →  READING  →  DONE
- *                                  ↑___________________________↓  (loops)
- *
- *  THRESHOLDING
- *  ─────────────
- *  During calibration we measure ambient brightness B_ambient.
- *  Threshold T = B_ambient + THRESHOLD_OFFSET (default 30).
- *  A sample > T  → bit 1
- *  A sample ≤ T  → bit 0
- *  The threshold auto-adjusts via an exponential moving average
- *  of the ambient floor to handle slow lighting changes.
- *
- *  SYNCHRONISATION (Preamble detection)
- *  ──────────────────────────────────────
- *  The receiver continuously samples at BIT_RATE_MS intervals.
- *  It maintains a rolling "preamble buffer" of the last 6 bits.
- *  When the buffer matches PREAMBLE, it transitions to READING.
- *  This means the receiver doesn't need to be time-locked with
- *  the sender — it self-synchronises on the start-of-frame.
- *
+ * LI-FI OWC TERMINAL — script.js
+ * Optical Wireless Communication via On-Off Keying (OOK)
  * ============================================================
  */
 
@@ -45,7 +12,7 @@
 // ─────────────────────────────────────────────
 const BIT_RATE_MS        = 300;     // milliseconds per bit
 const PREAMBLE           = "101011";
-const POSTAMBLE          = "000000";
+const POSTAMBLE          = "00000011"; // 8-bit ETX (End of Text) byte
 const THRESHOLD_OFFSET   = 30;      // brightness units above ambient to call a "1"
 const CALIB_DURATION_MS  = 2000;    // how long to measure ambient during calibration
 const ROI_SIZE           = 50;      // pixels — size of the "Target Box" sample region
@@ -116,8 +83,7 @@ function sleep(ms) {
 }
 
 /** Convert a string to its ASCII binary representation.
- *  Each character → 8-bit padded binary string.
- *  Example: "Hi" → "0100100001101001"
+ * Each character → 8-bit padded binary string.
  */
 function textToBinary(text) {
   return text.split("").map(ch =>
@@ -126,16 +92,33 @@ function textToBinary(text) {
 }
 
 /** Convert a binary string back to ASCII text.
- *  Processes 8 bits at a time.
+ * Processes 8 bits at a time with error handling.
  */
 function binaryToText(binary) {
+  if (!binary || binary.length === 0) return "";
+  
   // Trim to a multiple of 8
   const trimmed = binary.slice(0, Math.floor(binary.length / 8) * 8);
   let result = "";
+  
   for (let i = 0; i < trimmed.length; i += 8) {
     const byte = trimmed.slice(i, i + 8);
-    result += String.fromCharCode(parseInt(byte, 2));
+    if (byte.length !== 8) break;
+    
+    const charCode = parseInt(byte, 2);
+    
+    // Accept printable ASCII (32-126) and common control chars
+    if ((charCode >= 32 && charCode <= 126) || [9, 10, 13].includes(charCode)) {
+      result += String.fromCharCode(charCode);
+    } else if (charCode === 0) {
+      // Stop at null terminator
+      break;
+    } else {
+      // Skip non-printable characters
+      result += "";
+    }
   }
+  
   return result;
 }
 
@@ -163,10 +146,10 @@ function setSignal(state, label) {
 //  ████████  SENDER MODULE  ████████
 // ─────────────────────────────────────────────
 
-let txActive     = false;   // Is a transmission in progress?
-let torchStream  = null;    // MediaStream for torch control
-let torchTrack   = null;    // MediaStreamTrack with torch support
-let useTorch     = false;   // true = hardware torch, false = screen flash fallback
+let txActive     = false;   
+let torchStream  = null;    
+let torchTrack   = null;    
+let useTorch     = false;   
 
 // DOM refs
 const senderInput     = document.getElementById("sender-input");
@@ -195,7 +178,6 @@ btnConvert.addEventListener("click", () => {
 
   const binary = textToBinary(text);
 
-  // Render each bit with coloured spans
   binaryDisplay.innerHTML = binary.split("").map(b =>
     `<span class="bit-${b}">${b}</span>`
   ).join("");
@@ -217,10 +199,8 @@ btnTransmit.addEventListener("click", async () => {
     return;
   }
 
-  // Request camera access to get torch capability
   await initTorch();
 
-  // Build the full frame: Preamble + Data + Postamble
   const fullFrame = PREAMBLE + binary + POSTAMBLE;
   log("tx-log", `Frame: ${fullFrame.length} bits total`, "info");
   log("tx-log", "Transmitting...", "tx");
@@ -236,12 +216,11 @@ btnTransmit.addEventListener("click", async () => {
   txActive = false;
   btnTransmit.disabled = false;
   btnConvert.disabled  = false;
-  setLight(false);  // Ensure light is off after transmission
+  setLight(false);  
   setIndicatorState("STANDBY", false);
   setSignal("idle", "IDLE");
   log("tx-log", "Transmission complete.", "ok");
 
-  // Release torch track if we used it
   if (torchTrack) {
     torchTrack.stop();
     torchTrack = null;
@@ -249,12 +228,6 @@ btnTransmit.addEventListener("click", async () => {
   }
 });
 
-/**
- * REQUEST TORCH / CAMERA
- * Tries to acquire the hardware torch via the Torch API.
- * On failure (especially iOS Safari which doesn't support torch),
- * falls back to screen modulation.
- */
 async function initTorch() {
   try {
     torchStream = await navigator.mediaDevices.getUserMedia({
@@ -262,59 +235,34 @@ async function initTorch() {
     });
     torchTrack = torchStream.getVideoTracks()[0];
 
-    // Check if torch capability exists
     const capabilities = torchTrack.getCapabilities();
     if (capabilities.torch) {
       useTorch = true;
       log("tx-log", "Hardware torch detected ✓", "ok");
     } else {
-      // Torch API not supported — use screen flash fallback
       useTorch = false;
       log("tx-log", "Torch not supported → screen fallback", "info");
-      torchTrack.stop(); // Don't need the stream
+      torchTrack.stop(); 
       torchStream = null;
       torchTrack  = null;
     }
   } catch (err) {
-    // Camera denied or not available — screen only
     useTorch = false;
     log("tx-log", `Camera unavailable: ${err.message} → screen fallback`, "err");
   }
 }
 
-/**
- * SET LIGHT STATE
- * Either toggles the hardware torch or the full-screen flash overlay.
- *
- * @param {boolean} on - true = light on, false = light off
- */
 async function setLight(on) {
   if (useTorch && torchTrack) {
     try {
       await torchTrack.applyConstraints({ advanced: [{ torch: on }] });
-    } catch (e) {
-      // Torch constraint failed mid-transmission; silently fall through
-    }
+    } catch (e) {}
   } else {
-    // SCREEN MODULATION FALLBACK
-    // When torch isn't available, flash the entire screen white/black.
-    // The receiver camera reads brightness changes through the screen.
     screenFlash.classList.remove("hidden", "on", "off");
     screenFlash.classList.add(on ? "on" : "off");
   }
 }
 
-/**
- * TRANSMISSION LOOP
- * Iterates over each bit in the frame at BIT_RATE_MS interval.
- * Uses async/await to create a non-blocking "precise" timer.
- *
- * Note on timing precision:
- *   setTimeout isn't perfectly precise. For audio/video sync you'd use
- *   AudioContext.currentTime. At 300ms/bit the drift is negligible.
- *
- * @param {string} frame - full bit string including preamble/postamble
- */
 async function transmitFrame(frame) {
   const total = frame.length;
 
@@ -322,24 +270,18 @@ async function transmitFrame(frame) {
     const bit = frame[i];
     const isOn = bit === "1";
 
-    // Drive the light
     await setLight(isOn);
-
-    // Update visual indicator
     setIndicatorState(isOn ? "1 — LIGHT ON" : "0 — LIGHT OFF", isOn);
 
-    // Update progress bar
     const pct = Math.round(((i + 1) / total) * 100);
     progressFill.style.width = pct + "%";
     progressBit.textContent  = `BIT ${i + 1}/${total}`;
     progressPct.textContent  = pct + "%";
 
-    // Wait one bit period before the next bit
     await sleep(BIT_RATE_MS);
   }
 }
 
-/** Update the visual flashlight indicator on the sender UI */
 function setIndicatorState(label, isOn) {
   indicatorWrap.classList.toggle("indicator-on", isOn);
   indicatorState.textContent = label;
@@ -352,47 +294,24 @@ function setIndicatorState(label, isOn) {
 //  ████████  RECEIVER MODULE  ████████
 // ─────────────────────────────────────────────
 
-/**
- * RECEIVER STATE MACHINE (IMPROVED)
- * ─────────────────────────────────────────────
- * States:
- *   IDLE        → Nothing happening. Camera not started.
- *   CALIBRATING → 2-second ambient measurement before listening.
- *   SCANNING    → Actively sampling, looking for PREAMBLE "101011".
- *   READING     → Preamble found; recording payload bits + live decode.
- *   DONE        → Postamble "000000" received; message decoded.
- *   COMPLETE    → Final state after postamble; auto-stopped.
- *
- * ROBUSTNESS IMPROVEMENTS:
- *   - Multi-sample majority voting: 5 sub-samples per bit period
- *   - Adaptive threshold with hysteresis band
- *   - Live character-by-character decoding during READING
- *   - Timeout guard to prevent stuck READING state
- *   - Consecutive-zero guard for postamble (must match exactly)
- *   - Message history accumulation
- *   - Clear auto-stop on postamble detection
- */
 let rxState          = "IDLE";
-let rxStream         = null;    // MediaStream from back camera
-let rxAnimFrame      = null;    // requestAnimationFrame handle for 60fps loop
-let threshold        = 128;     // Dynamic threshold (brightness value)
-let ambientBaseline  = 0;       // Measured ambient brightness
-let rxBitBuffer      = [];      // Accumulated decoded bits
-let preambleWindow   = [];      // Rolling 6-bit window for preamble detection
-let graphData        = [];      // Brightness history for the live chart
-let rxLoopActive     = false;   // Flag to control sampling loop
-let lastSampleTime   = 0;       // Timestamp of last bit sample
-let sampleInterval   = null;    // setInterval handle for BIT_RATE_MS sampling
-let messageCount     = 0;       // Messages received this session
-let readingStartTime = 0;       // Timestamp when READING state started
-let lastBitConfidence = 0;      // Confidence of last bit decision (0-100)
+let rxStream         = null;    
+let rxAnimFrame      = null;    
+let threshold        = 128;     
+let ambientBaseline  = 0;       
+let rxBitBuffer      = [];      
+let preambleWindow   = [];      
+let graphData        = [];      
+let rxLoopActive     = false;   
+let lastSampleTime   = 0;       
+let sampleInterval   = null;    
+let messageCount     = 0;       
+let readingStartTime = 0;       
+let lastBitConfidence = 0;      
 
-// Robustness constants
-const MULTI_SAMPLE_COUNT  = 5;      // Sub-samples per bit period for majority voting
-const MULTI_SAMPLE_DELAY  = 40;     // ms between sub-samples (5 × 40ms = 200ms in 300ms window)
-const MAX_PAYLOAD_BITS    = 1200;   // Max payload before forced timeout (150 chars × 8)
-const READING_TIMEOUT_MS  = 60000;  // 60s max reading time before forced stop
-const HYSTERESIS_BAND     = 8;      // Brightness units for hysteresis (prevents flicker at threshold)
+const MAX_PAYLOAD_BITS    = 1200;   
+const READING_TIMEOUT_MS  = 60000;  
+const HYSTERESIS_BAND     = 8;      
 
 // DOM refs
 const rxVideo       = document.getElementById("receiver-video");
@@ -421,7 +340,6 @@ const messageHistory = document.getElementById("message-history");
 const graphCtx = graphCanvas.getContext("2d");
 const hiddenCtx = hiddenCanvas.getContext("2d", { willReadFrequently: true });
 
-// Resize graph canvas to match CSS size
 function resizeGraphCanvas() {
   const rect = graphCanvas.getBoundingClientRect();
   graphCanvas.width  = rect.width  || 400;
@@ -430,14 +348,12 @@ function resizeGraphCanvas() {
 window.addEventListener("resize", resizeGraphCanvas);
 resizeGraphCanvas();
 
-// ── BANNER UPDATER ──
 function updateBanner(state, text, icon) {
   rxBanner.className = "rx-status-banner " + state;
   rxBannerText.textContent = text;
   if (icon) rxBannerIcon.textContent = icon;
 }
 
-// ── START RECEIVER ──
 btnRxStart.addEventListener("click", async () => {
   if (rxState !== "IDLE" && rxState !== "COMPLETE") return;
   await startReceiver();
@@ -460,9 +376,14 @@ async function startReceiver() {
   try {
     rxStream = await navigator.mediaDevices.getUserMedia({
       video: {
-        facingMode: "environment",  // Use back camera for light detection
+        facingMode: "environment",  
         width:  { ideal: 1280 },
-        height: { ideal: 720 }
+        height: { ideal: 720 },
+        // Attempt to lock exposure and white balance
+        advanced: [
+          { exposureMode: "manual" },
+          { whiteBalanceMode: "manual" }
+        ]
       }
     });
   } catch (err) {
@@ -475,7 +396,6 @@ async function startReceiver() {
   rxVideo.srcObject = rxStream;
   await new Promise(r => rxVideo.onloadedmetadata = r);
 
-  // Size the hidden canvas to match video resolution
   hiddenCanvas.width  = rxVideo.videoWidth  || 640;
   hiddenCanvas.height = rxVideo.videoHeight || 480;
 
@@ -484,17 +404,12 @@ async function startReceiver() {
   setSignal("active", "RX LIVE");
   log("rx-log", `Camera started: ${hiddenCanvas.width}×${hiddenCanvas.height}`, "ok");
 
-  // Reset message state
   rxBitBuffer    = [];
   preambleWindow = [];
 
-  // Start 60fps brightness sampling loop (for graph & calibration)
   startBrightnessLoop();
-
-  // Run calibration immediately
   await runCalibration();
 
-  // Then switch to scanning
   setRxState("SCANNING");
   startBitSampler();
 }
@@ -522,42 +437,17 @@ function stopReceiver() {
   log("rx-log", "Receiver stopped.", "info");
 }
 
-// ─────────────────────────────────────────────
-//  IMAGE PROCESSING — BRIGHTNESS EXTRACTION
-// ─────────────────────────────────────────────
-
-/**
- * EXTRACT ROI BRIGHTNESS
- *
- * The "Region of Interest" (ROI) is the centre 50×50 pixel region
- * of the video frame — the area inside the green Target Box.
- *
- * Steps:
- *  1. Draw the current video frame to an off-screen <canvas>.
- *  2. Call getImageData() on just the ROI (not the full frame —
- *     this is much faster at 60fps).
- *  3. Compute the average luminance of all pixels in the ROI.
- *
- * Luminance formula:
- *   Y = 0.299·R + 0.587·G + 0.114·B  (ITU-R BT.601)
- *   This matches human perception better than a simple R+G+B/3 average.
- *
- * @returns {number} Average brightness [0–255]
- */
 function extractRoiBrightness() {
   const W = hiddenCanvas.width;
   const H = hiddenCanvas.height;
 
-  // Draw current video frame to hidden canvas
   hiddenCtx.drawImage(rxVideo, 0, 0, W, H);
 
-  // Compute ROI bounds — exactly the centre 50×50 region
   const roiX = Math.floor((W - ROI_SIZE) / 2);
   const roiY = Math.floor((H - ROI_SIZE) / 2);
 
-  // Extract pixel data for just the ROI
   const imageData = hiddenCtx.getImageData(roiX, roiY, ROI_SIZE, ROI_SIZE);
-  const pixels    = imageData.data; // Uint8ClampedArray: [R,G,B,A, R,G,B,A, ...]
+  const pixels    = imageData.data; 
 
   let totalLuminance = 0;
   const numPixels = ROI_SIZE * ROI_SIZE;
@@ -566,25 +456,12 @@ function extractRoiBrightness() {
     const r = pixels[i];
     const g = pixels[i + 1];
     const b = pixels[i + 2];
-    // Perceptual luminance — more accurate than simple average
     totalLuminance += 0.299 * r + 0.587 * g + 0.114 * b;
   }
 
   return totalLuminance / numPixels;
 }
 
-// ─────────────────────────────────────────────
-//  60 FPS BRIGHTNESS LOOP (Graph + UI updates)
-// ─────────────────────────────────────────────
-
-/**
- * This runs at the display frame rate (~60fps) and does TWO things:
- * 1. Updates the live brightness graph
- * 2. Feeds fresh brightness values to the bit sampler
- *
- * NOTE: The bit sampler (setInterval at BIT_RATE_MS) is separate —
- * it reads `currentBrightness` which this loop keeps updated.
- */
 let currentBrightness = 0;
 
 function startBrightnessLoop() {
@@ -593,17 +470,14 @@ function startBrightnessLoop() {
   function loop() {
     if (!rxLoopActive) return;
 
-    if (rxVideo.readyState >= 2) { // HAVE_CURRENT_DATA
+    if (rxVideo.readyState >= 2) { 
       currentBrightness = extractRoiBrightness();
 
-      // Update UI stats
       statCurrent.textContent = Math.round(currentBrightness);
 
-      // Add to graph history
       graphData.push(currentBrightness);
       if (graphData.length > GRAPH_HISTORY) graphData.shift();
 
-      // Redraw chart
       drawGraph();
     }
 
@@ -613,17 +487,6 @@ function startBrightnessLoop() {
   loop();
 }
 
-// ─────────────────────────────────────────────
-//  CALIBRATION
-// ─────────────────────────────────────────────
-
-/**
- * CALIBRATION STEP (IMPROVED)
- *
- * Measures ambient light, computes threshold with noise floor analysis.
- * Also computes the standard deviation of ambient noise to set a
- * smarter HYSTERESIS_BAND.
- */
 async function runCalibration() {
   setRxState("CALIBRATING");
   updateBanner("calibrating", "CALIBRATING — KEEP LIGHT AWAY FROM SENSOR...", "⟳");
@@ -632,12 +495,11 @@ async function runCalibration() {
   const samples = [];
   const start   = Date.now();
 
-  // Sample brightness rapidly during calibration window
   while (Date.now() - start < CALIB_DURATION_MS) {
     if (rxVideo.readyState >= 2) {
       samples.push(extractRoiBrightness());
     }
-    await sleep(50); // 20 samples/sec during calibration
+    await sleep(50); 
   }
 
   if (samples.length === 0) {
@@ -646,15 +508,11 @@ async function runCalibration() {
     return;
   }
 
-  // Calculate ambient average
   ambientBaseline = samples.reduce((a, b) => a + b, 0) / samples.length;
 
-  // Calculate noise floor (std deviation) for smarter thresholding
   const variance = samples.reduce((sum, v) => sum + (v - ambientBaseline) ** 2, 0) / samples.length;
   const noiseStdDev = Math.sqrt(variance);
 
-  // Threshold = ambient + max(THRESHOLD_OFFSET, 3×noise_stddev)
-  // This ensures threshold is always well above noise floor
   const dynamicOffset = Math.max(THRESHOLD_OFFSET, noiseStdDev * 3);
   threshold = ambientBaseline + dynamicOffset;
 
@@ -662,29 +520,7 @@ async function runCalibration() {
   log("rx-log", `Ambient: ${Math.round(ambientBaseline)}, Noise: ±${noiseStdDev.toFixed(1)}, Threshold: ${Math.round(threshold)}`, "ok");
 }
 
-// ─────────────────────────────────────────────
-//  BIT SAMPLER — STATE MACHINE CORE
-// ─────────────────────────────────────────────
-
-/**
- * BIT SAMPLER (IMPROVED — Multi-sample majority voting)
- *
- * Instead of taking a single brightness sample per bit period,
- * we take MULTI_SAMPLE_COUNT (5) sub-samples spaced across the
- * bit window, then use majority voting to decide 0 or 1.
- *
- * This dramatically reduces errors from:
- *   - Sampling at bit transition edges
- *   - Brief camera noise spikes
- *   - Slight timing drift between sender and receiver
- *
- * Additionally includes:
- *   - Hysteresis band to prevent flickering near threshold
- *   - Timeout guard for stuck READING state
- *   - Confidence metric per bit
- */
-
-let lastBitValue = "0";  // Track last decided bit for hysteresis
+let lastBitValue = "0";  
 
 function startBitSampler() {
   clearInterval(sampleInterval);
@@ -692,8 +528,6 @@ function startBitSampler() {
   sampleInterval = setInterval(() => {
     if (rxState === "IDLE" || rxState === "CALIBRATING" || rxState === "COMPLETE") return;
 
-    // ── TIMEOUT GUARD ──
-    // If we've been in READING state too long, force-stop
     if (rxState === "READING") {
       const elapsed = Date.now() - readingStartTime;
       if (elapsed > READING_TIMEOUT_MS) {
@@ -708,50 +542,40 @@ function startBitSampler() {
       }
     }
 
-    // ── MULTI-SAMPLE MAJORITY VOTING ──
-    // Collect brightness samples using the latest value from the 60fps loop
-    // We use a single mid-bit sample for the main decision, plus a
-    // confidence metric based on how far above/below threshold the reading is.
-    const brightness = currentBrightness;
+    // ── TRUE MULTI-SAMPLING ──
+    // Average the last 5 frames (~80ms of visual data) to smooth out underwater ripples
+    const recentSamples = graphData.slice(-5);
+    const avgBrightness = recentSamples.length > 0 
+      ? recentSamples.reduce((a, b) => a + b, 0) / recentSamples.length 
+      : currentBrightness;
 
-    // Calculate distance from threshold (used for confidence)
+    const brightness = avgBrightness;
+
     const distFromThreshold = brightness - threshold;
     const absDistance = Math.abs(distFromThreshold);
 
-    // ── HYSTERESIS ──
-    // If brightness is within HYSTERESIS_BAND of threshold, keep the last bit.
-    // This prevents rapid toggling when brightness hovers near threshold.
     let bit;
     if (absDistance < HYSTERESIS_BAND) {
-      bit = lastBitValue; // Maintain previous state in hysteresis band
+      bit = lastBitValue; 
     } else {
       bit = brightness > threshold ? "1" : "0";
     }
     lastBitValue = bit;
 
-    // Confidence: how certain are we about this bit?
-    // 100% at 2× threshold offset, 0% at threshold
     lastBitConfidence = Math.min(100, Math.round((absDistance / THRESHOLD_OFFSET) * 100));
     statConfidence.textContent = lastBitConfidence + "%";
 
-    // ── SLOW AMBIENT DRIFT CORRECTION ──
     if (rxState === "SCANNING" && bit === "0") {
       ambientBaseline = EMA_ALPHA * brightness + (1 - EMA_ALPHA) * ambientBaseline;
       threshold       = ambientBaseline + THRESHOLD_OFFSET;
       statThreshold.textContent = Math.round(threshold);
     }
 
-    // Feed bit into state machine
     processBit(bit);
 
   }, BIT_RATE_MS);
 }
 
-/**
- * FORCE DECODE AND STOP
- * Called when timeout/max-bits is exceeded during READING.
- * Attempts to decode whatever we have.
- */
 function forceDecodeAndStop(reason) {
   clearInterval(sampleInterval);
 
@@ -770,45 +594,35 @@ function forceDecodeAndStop(reason) {
   reticleBox.classList.remove("locked");
 }
 
-/**
- * PROCESS BIT — State Machine (IMPROVED)
- *
- * - SCANNING: Rolling preamble detection with visual feedback
- * - READING: Payload accumulation with live char-by-char decoding,
- *            postamble detection with auto-stop
- *
- * @param {string} bit - "0" or "1"
- */
 function processBit(bit) {
   statBitsEl.textContent = rxBitBuffer.length;
 
-  // Maintain rolling preamble window (last N bits)
   preambleWindow.push(bit);
   if (preambleWindow.length > PREAMBLE.length) {
     preambleWindow.shift();
   }
 
-  // ── STATE: SCANNING ──
   if (rxState === "SCANNING") {
     updateBitBufferUI([...preambleWindow], "preamble");
     updateBanner("scanning", `SCANNING FOR PREAMBLE... [${preambleWindow.join("")}]`, "◎");
 
     const windowStr = preambleWindow.join("");
     if (windowStr === PREAMBLE) {
-      // ✓ Preamble detected! Transition to READING state.
       log("rx-log", `★ PREAMBLE DETECTED [${PREAMBLE}] — Now reading data...`, "ok");
       setRxState("READING");
-      rxBitBuffer    = [];  // Clear buffer — ready to collect payload
-      preambleWindow = [];  // Reset preamble window
-      readingStartTime = Date.now(); // Start timeout clock
+      rxBitBuffer    = [];  
+      preambleWindow = [];  
+      readingStartTime = Date.now(); 
       reticleBox.classList.add("locked");
 
-      // Reset live decode
       liveDecode.innerHTML = '<span class="cursor-blink"></span>';
       liveCharsCount.textContent = "0 chars";
       liveBitsProgress.textContent = "next char: 0/8 bits";
       decodedOutput.innerHTML = '<span class="dim">Receiving data...</span>';
       updateBanner("reading", "★ PREAMBLE FOUND — RECEIVING DATA...", "⬤");
+      
+      // DEBUG: Log preamble detection for alignment check
+      log("rx-log", `[DEBUG] Preamble detected, starting fresh buffer for payload`, "info");
     }
     return;
   }
@@ -819,111 +633,143 @@ function processBit(bit) {
     statBitsEl.textContent = rxBitBuffer.length;
     updateBitBufferUI(rxBitBuffer, "data");
 
-    // ── Live character-by-character decoding ──
     updateLiveDecode();
 
-    // Update banner with progress
     const charsDone = Math.floor(rxBitBuffer.length / 8);
     const bitsIntoChar = rxBitBuffer.length % 8;
     updateBanner("reading",
       `RECEIVING DATA — ${rxBitBuffer.length} bits (${charsDone} chars decoded)`,
-      "⬤");
+      "�●");
 
-    // ── Check last 6 bits for postamble ──
-    if (rxBitBuffer.length >= POSTAMBLE.length) {
-      const tail = rxBitBuffer.slice(-POSTAMBLE.length).join("");
+    // ── POSTAMBLE DETECTION (BYTE-ALIGNED ONLY) ──
+    // Only check for postamble at byte boundaries to prevent false positives
+    // The space char (00100000) can create confusing patterns when followed by other bits
+    if (rxBitBuffer.length >= POSTAMBLE.length && rxBitBuffer.length % 8 === 0) {
+      const lastByte = rxBitBuffer.slice(-POSTAMBLE.length).join("");
+      
+      if (lastByte === POSTAMBLE) {
+        // ✓ Postamble detected at byte boundary!
+        clearInterval(sampleInterval); 
 
-      if (tail === POSTAMBLE) {
-        // ✓ Postamble detected! Strip it and decode the payload.
-        clearInterval(sampleInterval); // STOP sampling immediately
-
+        // Extract payload: everything EXCEPT the last 8 bits (the postamble)
         const payloadBits = rxBitBuffer
           .slice(0, rxBitBuffer.length - POSTAMBLE.length)
           .join("");
 
-        log("rx-log", `★ POSTAMBLE DETECTED [${POSTAMBLE}] — Payload: ${payloadBits.length} bits`, "ok");
+        log("rx-log", `★ POSTAMBLE DETECTED [${POSTAMBLE}] at byte-aligned position ${rxBitBuffer.length - POSTAMBLE.length}`, "ok");
+        log("rx-log", `Payload extracted: ${payloadBits.length} bits (${Math.floor(payloadBits.length / 8)} complete bytes)`, "ok");
+        log("rx-log", `[DEBUG] Full buffer before extraction: ${rxBitBuffer.join("")}`, "info");
+        log("rx-log", `[DEBUG] Payload bits: ${payloadBits}`, "info");
         decodePayload(payloadBits);
 
-        // ── AUTO-STOP: Go to COMPLETE state ──
         setRxState("COMPLETE");
         reticleBox.classList.remove("locked");
-
-        // Reset buffers
         rxBitBuffer    = [];
         preambleWindow = [];
 
         log("rx-log", "✓ Transmission complete. Receiver auto-stopped.", "ok");
         log("rx-log", "Press START to receive another message.", "info");
+        return;
       }
     }
-    return;
   }
 }
 
-/**
- * LIVE DECODE
- * Shows characters as they are decoded in real-time, 8 bits at a time.
- * Also shows progress toward the next character.
- */
 function updateLiveDecode() {
   const totalBits = rxBitBuffer.length;
   const fullChars = Math.floor(totalBits / 8);
   const remainingBits = totalBits % 8;
 
-  // Decode all complete characters
   let decodedSoFar = "";
   for (let i = 0; i < fullChars; i++) {
     const byte = rxBitBuffer.slice(i * 8, (i + 1) * 8).join("");
     const charCode = parseInt(byte, 2);
+    // Show printable ASCII including spaces (32-126) normally, use dot for others
     if (charCode >= 32 && charCode <= 126) {
       decodedSoFar += String.fromCharCode(charCode);
+    } else if (charCode === 9) {
+      decodedSoFar += "→"; // Tab
+    } else if (charCode === 10) {
+      decodedSoFar += "↵"; // Newline
     } else {
-      decodedSoFar += "·"; // Non-printable placeholder
+      decodedSoFar += "·"; 
     }
   }
 
-  // Render with blinking cursor
   liveDecode.innerHTML = (decodedSoFar || "") + '<span class="cursor-blink"></span>';
   liveCharsCount.textContent = fullChars + " chars";
   liveBitsProgress.textContent = `next char: ${remainingBits}/8 bits`;
 }
 
-/**
- * DECODE PAYLOAD (IMPROVED)
- * Convert the received binary payload back to ASCII text.
- * Add to message history. Show prominent completion UI.
- *
- * @param {string} bits - binary string of the payload (no preamble/postamble)
- */
 function decodePayload(bits) {
-  const text = binaryToText(bits);
-  log("rx-log", `✓ Decoded: "${text}" (${bits.length} bits → ${text.length} chars)`, "ok");
+  // Ensure bits string is properly formed
+  if (!bits || bits.length === 0) {
+    log("rx-log", "✗ Decode error: Empty payload", "err");
+    return;
+  }
 
-  // Update main decoded output
+  log("rx-log", `[DEBUG] Raw received bits: ${bits}`, "info");
+  log("rx-log", `[DEBUG] Length: ${bits.length} bits (${Math.floor(bits.length / 8)} complete bytes, ${bits.length % 8} remaining bits)`, "info");
+
+  // NO padding - work with exact bits received
+  let text = "";
+  let charCodes = [];
+  let validCharCount = 0;
+  
+  // Process only complete 8-bit bytes
+  const completeBytes = Math.floor(bits.length / 8);
+  log("rx-log", `[DEBUG] Processing ${completeBytes} complete bytes...`, "info");
+  
+  for (let i = 0; i < completeBytes; i++) {
+    const byte = bits.slice(i * 8, (i + 1) * 8);
+    const charCode = parseInt(byte, 2);
+    charCodes.push({ byte, charCode, char: String.fromCharCode(charCode) });
+    
+    // Accept printable ASCII (including space!) and common control characters
+    if ((charCode >= 32 && charCode <= 126) || charCode === 10 || charCode === 13 || charCode === 9) {
+      text += String.fromCharCode(charCode);
+      validCharCount++;
+    } else if (charCode === 0) {
+      // Stop at null terminator if present
+      break;
+    } else {
+      // For non-printable, show what it is
+      text += `[${charCode}]`;
+    }
+  }
+
+  // Log each decoded byte
+  const charMapStr = charCodes.map((c, idx) => 
+    `[${idx}]: ${c.byte} = ${c.charCode} = '${c.char}' ${(c.charCode >= 32 && c.charCode <= 126) ? '✓' : '✗'}`
+  ).join(" | ");
+  log("rx-log", `[DEBUG] Byte-by-byte: ${charMapStr}`, "info");
+
+  // Clean up text - remove any [...] markers for non-printable if they weren't useful
+  text = text.replace(/\s+$/g, ""); // Only trim trailing whitespace at very end
+  text = text.replace(/[\x00-\x08\x0e-\x1f\x7f]*$/g, ""); // Remove trailing control chars
+
+  if (validCharCount === 0) {
+    log("rx-log", "✗ No valid characters in standard alignment. Check received bits.", "err");
+    return;
+  }
+
+  log("rx-log", `✓ Decoded (${completeBytes} bytes): "${text}" (${validCharCount} valid chars)`, "ok");
+
   decodedOutput.textContent = text;
   decodedOutput.classList.add("flash");
   setTimeout(() => decodedOutput.classList.remove("flash"), 2000);
 
-  // Update live decode (final)
   liveDecode.innerHTML = text;
 
-  // Update signal
   setSignal("active", "MSG RX ✓");
 
-  // Update banner to COMPLETE
   updateBanner("complete", `✓ MESSAGE RECEIVED: "${text.length > 40 ? text.slice(0,40) + '…' : text}"`, "✓");
 
-  // ── Add to message history ──
   messageCount++;
   addToMessageHistory(text);
 }
 
-/**
- * ADD TO MESSAGE HISTORY
- * Appends a received message to the scrollable history panel.
- */
 function addToMessageHistory(text) {
-  // Clear the "no messages" placeholder on first message
   if (messageCount === 1) {
     messageHistory.innerHTML = "";
   }
@@ -944,18 +790,12 @@ function addToMessageHistory(text) {
   messageHistory.scrollTop = messageHistory.scrollHeight;
 }
 
-/** Escape HTML entities for safe display */
 function escapeHtml(str) {
   const div = document.createElement("div");
   div.textContent = str;
   return div.innerHTML;
 }
 
-// ─────────────────────────────────────────────
-//  UI UPDATE HELPERS — RECEIVER
-// ─────────────────────────────────────────────
-
-/** Transition the receiver state machine and update all related UI */
 function setRxState(newState) {
   rxState = newState;
   rxStateBadge.className = "rx-state-badge " + newState.toLowerCase();
@@ -966,7 +806,6 @@ function setRxState(newState) {
   if (newState === "SCANNING") reticleBox.classList.add("scanning");
   if (newState === "READING")  reticleBox.classList.add("locked");
 
-  // Update banner for states that don't have custom banner updates
   if (newState === "SCANNING") {
     updateBanner("scanning", "SCANNING FOR PREAMBLE PATTERN [101011]...", "◎");
   } else if (newState === "IDLE") {
@@ -976,16 +815,14 @@ function setRxState(newState) {
   } else if (newState === "DONE") {
     updateBanner("done", "MESSAGE DECODED — PROCESSING...", "✓");
   } else if (newState === "COMPLETE") {
-    // Banner is set by decodePayload / forceDecodeAndStop
-    // Update button states: hide STOP, show START
     btnRxStop.classList.add("hidden");
     btnRxStart.classList.remove("hidden");
     btnRxStart.textContent = "START RECEIVER";
   }
 }
 
-/** Render the bit buffer with coloured 0/1 spans */
-function updateBitBufferUI(bits, mode) {
+function updateBitBufferUI(bits, mode) 
+{
   if (!bits.length) {
     bitBufferEl.innerHTML = '<span class="dim">—</span>';
     return;
@@ -997,22 +834,6 @@ function updateBitBufferUI(bits, mode) {
   }).join("");
 }
 
-// ─────────────────────────────────────────────
-//  LIVE BRIGHTNESS GRAPH
-// ─────────────────────────────────────────────
-
-/**
- * DRAW GRAPH
- *
- * Renders a scrolling line chart of brightness samples.
- * Also draws:
- *  - A horizontal amber dashed line for the current threshold
- *  - Colour-coded signal region fill (green when above threshold)
- *
- * This gives the user an immediate visual readout of whether
- * the light flashes are registering and whether the threshold
- * is well-positioned between noise floor and signal peak.
- */
 function drawGraph() {
   const W = graphCanvas.width;
   const H = graphCanvas.height;
@@ -1020,7 +841,6 @@ function drawGraph() {
 
   graphCtx.clearRect(0, 0, W, H);
 
-  // Background
   graphCtx.fillStyle = "#0d1117";
   graphCtx.fillRect(0, 0, W, H);
 
@@ -1028,7 +848,6 @@ function drawGraph() {
 
   const xStep = W / (GRAPH_HISTORY - 1);
 
-  // ── Threshold line ──
   const threshY = H - (threshold / 255) * H;
   graphCtx.setLineDash([4, 4]);
   graphCtx.strokeStyle = "rgba(245,166,35,0.5)";
@@ -1039,12 +858,10 @@ function drawGraph() {
   graphCtx.stroke();
   graphCtx.setLineDash([]);
 
-  // Threshold label
   graphCtx.fillStyle = "rgba(245,166,35,0.6)";
   graphCtx.font = "9px 'Share Tech Mono'";
   graphCtx.fillText(`T=${Math.round(threshold)}`, 4, threshY - 3);
 
-  // ── Signal fill (area under curve, colour-coded) ──
   graphCtx.beginPath();
   graphCtx.moveTo(0, H);
   for (let i = 0; i < data.length; i++) {
@@ -1056,7 +873,6 @@ function drawGraph() {
   graphCtx.lineTo((data.length - 1) * xStep, H);
   graphCtx.closePath();
 
-  // Green above threshold, dim below
   const grad = graphCtx.createLinearGradient(0, 0, 0, H);
   grad.addColorStop(0, "rgba(57,255,20,0.25)");
   grad.addColorStop(threshold / 255, "rgba(57,255,20,0.08)");
@@ -1064,7 +880,6 @@ function drawGraph() {
   graphCtx.fillStyle = grad;
   graphCtx.fill();
 
-  // ── Signal line ──
   graphCtx.beginPath();
   graphCtx.lineWidth = 1.5;
   graphCtx.strokeStyle = "rgba(57,255,20,0.9)";
@@ -1076,7 +891,6 @@ function drawGraph() {
   }
   graphCtx.stroke();
 
-  // ── Current value dot ──
   const lastVal = data[data.length - 1];
   const dotX = (data.length - 1) * xStep;
   const dotY = H - (lastVal / 255) * H;
@@ -1085,6 +899,6 @@ function drawGraph() {
   graphCtx.fillStyle = lastVal > threshold ? "var(--green)" : "rgba(57,255,20,0.4)";
   graphCtx.shadowColor = "rgba(57,255,20,0.8)";
   graphCtx.shadowBlur  = lastVal > threshold ? 8 : 0;
-  graphCtx.fill();
-  graphCtx.shadowBlur = 0;
+   graphCtx.fill();
+  graphCtx.shadowBlur = 0; 
 }

@@ -11,10 +11,8 @@
 </head>
 <body>
 
-  <!-- Scanline overlay for CRT effect -->
   <div class="scanlines"></div>
 
-  <!-- ==================== BOOT SCREEN ==================== -->
   <div id="boot-screen">
     <div class="boot-logo">
       <span class="boot-title">LI-FI</span>
@@ -24,10 +22,8 @@
     </div>
   </div>
 
-  <!-- ==================== MAIN APP ==================== -->
   <div id="app" class="hidden">
 
-    <!-- Header -->
     <header class="app-header">
       <div class="header-left">
         <span class="logo-text">LI-FI</span>
@@ -43,11 +39,9 @@
       </div>
     </header>
 
-    <!-- ==================== SENDER PANEL ==================== -->
     <section id="panel-sender" class="panel active">
       <div class="panel-grid">
 
-        <!-- Left: Input & Controls -->
         <div class="sender-controls">
           <div class="section-label">// INPUT MESSAGE</div>
           <textarea id="sender-input" placeholder="Type your message here..." maxlength="128"></textarea>
@@ -65,7 +59,7 @@
             <span class="data-label">DATA</span>
             <span id="frame-data" class="frame-data dim">—</span>
             <span class="postamble-label">POSTAMBLE</span>
-            <span id="frame-postamble" class="frame-postamble">000000</span>
+            <span id="frame-postamble" class="frame-postamble">00000011</span>
           </div>
 
           <div class="btn-row">
@@ -74,7 +68,6 @@
           </div>
         </div>
 
-        <!-- Right: Visual Indicator & Status -->
         <div class="sender-visual">
           <div class="section-label">// SIGNAL INDICATOR</div>
           <div class="flashlight-indicator-wrap">
@@ -101,17 +94,14 @@
             </div>
           </div>
 
-          <!-- Screen flash overlay for iOS fallback -->
           <div id="screen-flash" class="screen-flash hidden"></div>
         </div>
 
       </div>
     </section>
 
-    <!-- ==================== RECEIVER PANEL ==================== -->
     <section id="panel-receiver" class="panel hidden">
 
-      <!-- STATUS BANNER — always visible at top of receiver -->
       <div id="rx-status-banner" class="rx-status-banner idle">
         <span class="rx-banner-icon" id="rx-banner-icon">◉</span>
         <span class="rx-banner-text" id="rx-banner-text">RECEIVER IDLE — PRESS START</span>
@@ -119,14 +109,12 @@
 
       <div class="panel-grid receiver-grid">
 
-        <!-- Left: Video + Reticle -->
         <div class="receiver-video-col">
           <div class="section-label">// OPTICAL SENSOR FEED</div>
           <div class="video-wrap" id="video-wrap">
             <video id="receiver-video" autoplay muted playsinline></video>
             <canvas id="hidden-canvas" class="hidden-canvas"></canvas>
 
-            <!-- Overlay reticle -->
             <div class="reticle-overlay" id="reticle-overlay">
               <div class="reticle-box" id="reticle-box">
                 <span class="reticle-corner tl"></span>
@@ -137,7 +125,6 @@
               <div class="reticle-label">ALIGN FLASHLIGHT INSIDE BOX</div>
             </div>
 
-            <!-- State badge on video -->
             <div class="rx-state-badge" id="rx-state-badge">IDLE</div>
           </div>
 
@@ -148,7 +135,6 @@
           </div>
         </div>
 
-        <!-- Right: Graph + Decoder output -->
         <div class="receiver-data-col">
           <div class="section-label">// BRIGHTNESS SIGNAL (LIVE)</div>
           <canvas id="graph-canvas" class="graph-canvas"></canvas>
@@ -211,8 +197,6 @@
       </div>
     </section>
 
-  </div><!-- /app -->
-
-  <script src="script.js"></script>
+  </div><script src="script.js"></script>
 </body>
 </html>
