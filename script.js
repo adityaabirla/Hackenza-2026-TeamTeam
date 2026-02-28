@@ -198,11 +198,11 @@ function binaryToText(binary) {
       conflictDetails.push(
         `Char ${charIdx}: ${flips} bit(s) corrected via majority vote. A=${b1} B=${b2} C=${b3} → ${voted}`
       );
-      // If majority vote result doesn't match ANY copy, flag it
+      // If majority vote result doesn't match ANY copy, note it but still trust
+      // the per-bit majority — this IS the best estimate we can produce
       if (voted !== b1 && voted !== b2 && voted !== b3) {
-        hasUncorrectable = true;
         conflictDetails.push(
-          `Char ${charIdx}: Voted result ${voted} differs from all 3 copies — errors in different bit positions`
+          `Char ${charIdx}: Voted result ${voted} differs from all 3 copies — corrected via per-bit majority`
         );
       }
     }
@@ -489,6 +489,8 @@ let rawBrightnessHistory = [];  // Unfiltered brightness values for debug
 let bitPeriodSamples = [];      // Recent brightness readings for multi-sample voting
 let scanBitsSinceEdge = 0;      // Bits sampled since last edge detection
 let fallingEdgeTimer = 0;       // Timer for falling edge detection timeout
+let syncTimestamp = 0;          // Precise time of falling edge (bit clock reference)
+let bitsReadSinceSync = 0;      // Number of bits read since sync point (for absolute timing)
 
 // Robustness constants
 const MULTI_SAMPLE_COUNT  = 5;      // Sub-samples per bit period for majority voting
@@ -614,6 +616,8 @@ async function startReceiver() {
   bitPeriodSamples    = [];
   scanBitsSinceEdge   = 0;
   fallingEdgeTimer    = 0;
+  syncTimestamp       = 0;
+  bitsReadSinceSync   = 0;
 
   // Start 60fps brightness sampling loop (for graph & calibration)
   startBrightnessLoop();
@@ -649,6 +653,8 @@ function stopReceiver() {
   bitPeriodSamples    = [];
   scanBitsSinceEdge   = 0;
   fallingEdgeTimer    = 0;
+  syncTimestamp       = 0;
+  bitsReadSinceSync   = 0;
 
   btnRxStart.classList.remove("hidden");
   btnRxStop.classList.add("hidden");
@@ -735,9 +741,9 @@ function startBrightnessLoop() {
       // Update UI stats
       statCurrent.textContent = Math.round(currentBrightness);
 
-      // Accumulate samples for multi-sample voting in bit sampler
-      bitPeriodSamples.push(currentBrightness);
-      if (bitPeriodSamples.length > 30) bitPeriodSamples.shift();
+      // Accumulate timestamped samples for center-window voting in bit sampler
+      bitPeriodSamples.push({ value: currentBrightness, time: Date.now() });
+      if (bitPeriodSamples.length > 120) bitPeriodSamples.shift();
 
       // Add to graph history
       graphData.push(currentBrightness);
@@ -830,6 +836,8 @@ function startBitSampler() {
   edgeConfirmCounter = 0;
   scanBitsSinceEdge = 0;
   bitPeriodSamples = [];
+  syncTimestamp = 0;
+  bitsReadSinceSync = 0;
   if (sampleTimeout) clearTimeout(sampleTimeout);
   pollForEdge();
 }
@@ -866,7 +874,14 @@ function pollForEdge() {
        return;
     }
   } else if (rxState === "READING") {
-      sampleTimeout = setTimeout(readBitWithVoting, BIT_RATE_MS);
+      // Use absolute timing if we have a sync reference, else fall back
+      if (syncTimestamp > 0) {
+        const nextBitTime = syncTimestamp + (bitsReadSinceSync + 0.5) * BIT_RATE_MS;
+        const delay = Math.max(5, nextBitTime - Date.now());
+        sampleTimeout = setTimeout(readBitWithVoting, delay);
+      } else {
+        sampleTimeout = setTimeout(readBitWithVoting, BIT_RATE_MS);
+      }
   }
 }
 
@@ -887,7 +902,9 @@ function waitForFallingEdge() {
     preambleWindow = ["1"];
     scanBitsSinceEdge = 1;
     addDebugBit("1", currentBrightness, threshold, 100, "SYNC");
-    bitPeriodSamples = []; // Clear for fresh bit-period sampling
+    // Record precise sync timestamp for absolute bit clock timing
+    syncTimestamp = Date.now();
+    bitsReadSinceSync = 0;
     // Wait 0.5 × BIT_RATE to land in center of the "0" bit
     sampleTimeout = setTimeout(readBitWithVoting, Math.floor(BIT_RATE_MS * 0.5));
     return;
@@ -920,15 +937,31 @@ function readBitWithVoting() {
     return;
   }
 
-  // Multi-sample voting: use recent brightness readings from 60fps loop
-  const samplesToUse = Math.min(bitPeriodSamples.length, 12);
+  // ── CENTER-WINDOW SAMPLING ──
+  // Only use brightness samples from the middle 60% of the current bit period.
+  // This avoids transition edges where the sender is switching between 0/1.
+  const now = Date.now();
+  const bitStart = syncTimestamp + bitsReadSinceSync * BIT_RATE_MS;
+  const windowStart = bitStart + 0.2 * BIT_RATE_MS;
+  const windowEnd   = bitStart + 0.8 * BIT_RATE_MS;
+  const centerSamples = bitPeriodSamples.filter(
+    s => s.time >= windowStart && s.time <= windowEnd
+  );
+
   let bit, confidence;
 
-  if (samplesToUse >= 3) {
-    const recent = bitPeriodSamples.slice(-samplesToUse);
-    const aboveCount = recent.filter(v => v > threshold).length;
-    bit = aboveCount > samplesToUse / 2 ? "1" : "0";
-    confidence = Math.round(Math.max(aboveCount, samplesToUse - aboveCount) / samplesToUse * 100);
+  if (centerSamples.length >= 3) {
+    // MAJORITY VOTE across center-window samples
+    const aboveCount = centerSamples.filter(s => s.value > threshold).length;
+    const total = centerSamples.length;
+    bit = aboveCount > total / 2 ? "1" : "0";
+    confidence = Math.round(Math.max(aboveCount, total - aboveCount) / total * 100);
+  } else if (bitPeriodSamples.length >= 3) {
+    // Fallback: use most recent samples if center window had too few
+    const recent = bitPeriodSamples.slice(-8);
+    const aboveCount = recent.filter(s => s.value > threshold).length;
+    bit = aboveCount > recent.length / 2 ? "1" : "0";
+    confidence = Math.round(Math.max(aboveCount, recent.length - aboveCount) / recent.length * 100);
   } else {
     // Not enough samples — fall back to single reading with hysteresis
     const dist = currentBrightness - threshold;
@@ -939,7 +972,13 @@ function readBitWithVoting() {
   lastBitValue = bit;
   lastBitConfidence = confidence;
   statConfidence.textContent = confidence + "%";
-  bitPeriodSamples = []; // Clear for next bit period
+  bitsReadSinceSync++;
+
+  // Prune old samples (keep last 2 seconds)
+  const cutoff = now - 2000;
+  while (bitPeriodSamples.length > 0 && bitPeriodSamples[0].time < cutoff) {
+    bitPeriodSamples.shift();
+  }
 
   addDebugBit(bit, currentBrightness, threshold, confidence, rxState);
   processBit(bit);
@@ -977,7 +1016,11 @@ function readBitWithVoting() {
     return;
   }
 
-  sampleTimeout = setTimeout(readBitWithVoting, BIT_RATE_MS);
+  // ── ABSOLUTE TIMING — schedule next bit read based on sync timestamp ──
+  // This prevents cumulative drift from chained setTimeout calls.
+  const nextBitTime = syncTimestamp + (bitsReadSinceSync + 0.5) * BIT_RATE_MS;
+  const delay = Math.max(5, nextBitTime - Date.now());
+  sampleTimeout = setTimeout(readBitWithVoting, delay);
 }
 
 /**
@@ -1411,6 +1454,28 @@ function renderDebugLog() {
     html += `<span class="debug-bit ${e.bit === '1' ? 'db1' : 'db0'}" title="B:${e.brightness} T:${e.threshold} C:${e.confidence}%">${e.bit}</span>`;
   });
   html += '</div>';
+
+  // ── 8-BIT CHARACTER MAP — shows ASCII equivalent of every raw 8-bit group ──
+  const allBits = debugBitLog.map(e => e.bit).join("");
+  if (allBits.length >= 8) {
+    html += '<div class="debug-section-title" style="margin-top:8px">8-BIT CHARACTER MAP (raw stream → ASCII)</div>';
+    html += '<div class="debug-chars" style="font-size:10px; line-height:1.8;">';
+    const numOctets = Math.floor(allBits.length / 8);
+    for (let i = 0; i < numOctets; i++) {
+      const octet = allBits.substr(i * 8, 8);
+      const code = parseInt(octet, 2);
+      const ch = (code >= 32 && code <= 126) ? String.fromCharCode(code) : '\u00B7';
+      const displayCh = ch === '~' ? '~(SP)' : escapeHtml(ch);
+      html += `<span style="display:inline-block; margin:2px 3px; padding:2px 5px; border:1px solid var(--border); border-radius:3px; background:rgba(255,255,255,0.03);" title="0x${code.toString(16).toUpperCase().padStart(2,'0')} (${code})">`
+        + `<code style="color:var(--amber);">${octet}</code> `
+        + `<strong style="color:var(--cyan);">${displayCh}</strong></span>`;
+    }
+    const remBits = allBits.length - numOctets * 8;
+    if (remBits > 0) {
+      html += `<span style="display:inline-block; margin:2px 3px; color:var(--text-dim);"><code>${allBits.substr(numOctets * 8)}...</code> (${remBits}/8)</span>`;
+    }
+    html += '</div>';
+  }
 
   // Character breakdown — BITS_PER_CHAR (24-bit) blocks from READING-state bits only
   // Each character = 3 × 8-bit copies: COPY A, COPY B, COPY C
