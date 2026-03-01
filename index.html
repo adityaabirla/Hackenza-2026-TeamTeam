@@ -192,6 +192,51 @@
           <div class="tx-log" id="rx-log">
             <div class="log-entry dim">Receiver not started.</div>
           </div>
+
+          <div class="section-label" style="margin-top:16px">// DEBUG PANEL</div>
+          <div class="debug-panel" id="debug-panel">
+            <div class="debug-toolbar">
+              <span class="debug-title">RX INTERNAL STATE</span>
+              <button id="btn-debug-clear" class="debug-btn">CLEAR TRACE</button>
+            </div>
+
+            <div class="debug-grid">
+              <div class="debug-item"><span>STATE</span><b id="dbg-rx-state">IDLE</b></div>
+              <div class="debug-item"><span>BASELINE</span><b id="dbg-baseline">—</b></div>
+              <div class="debug-item"><span>THRESHOLD</span><b id="dbg-threshold">—</b></div>
+              <div class="debug-item"><span>CURRENT</span><b id="dbg-current">—</b></div>
+              <div class="debug-item"><span>AVG WINDOW</span><b id="dbg-avg">—</b></div>
+              <div class="debug-item"><span>STD DEV</span><b id="dbg-std">—</b></div>
+              <div class="debug-item"><span>DIST</span><b id="dbg-dist">—</b></div>
+              <div class="debug-item"><span>BIT</span><b id="dbg-bit">—</b></div>
+              <div class="debug-item"><span>CONF</span><b id="dbg-conf">—</b></div>
+              <div class="debug-item"><span>SAMPLES</span><b id="dbg-samples">0</b></div>
+              <div class="debug-item"><span>PREAMBLE WIN</span><b id="dbg-preamble">—</b></div>
+              <div class="debug-item"><span>BUFFER LEN</span><b id="dbg-buffer-len">0</b></div>
+              <div class="debug-item"><span>LAST BYTE</span><b id="dbg-last-byte">—</b></div>
+              <div class="debug-item"><span>POSTAMBLE</span><b id="dbg-postamble">—</b></div>
+            </div>
+
+            <div class="debug-block-wrap">
+              <div class="debug-block">
+                <div class="debug-block-title">PREAMBLE WINDOW</div>
+                <pre id="dbg-preamble-window">—</pre>
+              </div>
+              <div class="debug-block">
+                <div class="debug-block-title">BUFFER TAIL (LAST 64 BITS)</div>
+                <pre id="dbg-buffer-tail">—</pre>
+              </div>
+              <div class="debug-block">
+                <div class="debug-block-title">LAST BIT DECISION</div>
+                <pre id="dbg-last-decision">—</pre>
+              </div>
+            </div>
+
+            <div class="debug-block-title" style="margin-top:8px">EVENT TRACE</div>
+            <div class="debug-trace" id="dbg-events">
+              <div class="log-entry dim">Debug trace idle.</div>
+            </div>
+          </div>
         </div>
 
       </div>

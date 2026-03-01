@@ -300,18 +300,32 @@ let rxAnimFrame      = null;
 let threshold        = 128;     
 let ambientBaseline  = 0;       
 let rxBitBuffer      = [];      
+let rxBitMetaBuffer  = [];      
 let preambleWindow   = [];      
 let graphData        = [];      
+let brightnessHistory = [];     
 let rxLoopActive     = false;   
-let lastSampleTime   = 0;       
 let sampleInterval   = null;    
 let messageCount     = 0;       
 let readingStartTime = 0;       
 let lastBitConfidence = 0;      
+let lastBitValue     = "0";
+let bitTickIndex     = 0;
+let readingClockLocked = false;
+let lastDecisionMeta = null;
+let lastPostambleStatus = "—";
+
+let dbgFrameCounter = 0;
+const DEBUG_MAX_EVENTS = 220;
 
 const MAX_PAYLOAD_BITS    = 1200;   
 const READING_TIMEOUT_MS  = 60000;  
 const HYSTERESIS_BAND     = 8;      
+const SAMPLE_WINDOW_MS    = Math.round(BIT_RATE_MS * 0.7);
+const BRIGHTNESS_HISTORY_LIMIT = 500;
+const POSTAMBLE_MIN_PAYLOAD_BITS = 8;
+const POSTAMBLE_MIN_CONFIDENCE = 35;
+const PREAMBLE_MAX_HAMMING = 1;
 
 // DOM refs
 const rxVideo       = document.getElementById("receiver-video");
@@ -337,6 +351,26 @@ const rxBannerIcon  = document.getElementById("rx-banner-icon");
 const rxBannerText  = document.getElementById("rx-banner-text");
 const messageHistory = document.getElementById("message-history");
 
+const btnDebugClear = document.getElementById("btn-debug-clear");
+const dbgEventsEl = document.getElementById("dbg-events");
+const dbgRxStateEl = document.getElementById("dbg-rx-state");
+const dbgBaselineEl = document.getElementById("dbg-baseline");
+const dbgThresholdEl = document.getElementById("dbg-threshold");
+const dbgCurrentEl = document.getElementById("dbg-current");
+const dbgAvgEl = document.getElementById("dbg-avg");
+const dbgStdEl = document.getElementById("dbg-std");
+const dbgDistEl = document.getElementById("dbg-dist");
+const dbgBitEl = document.getElementById("dbg-bit");
+const dbgConfEl = document.getElementById("dbg-conf");
+const dbgSamplesEl = document.getElementById("dbg-samples");
+const dbgPreambleEl = document.getElementById("dbg-preamble");
+const dbgBufferLenEl = document.getElementById("dbg-buffer-len");
+const dbgLastByteEl = document.getElementById("dbg-last-byte");
+const dbgPostambleEl = document.getElementById("dbg-postamble");
+const dbgPreambleWindowEl = document.getElementById("dbg-preamble-window");
+const dbgBufferTailEl = document.getElementById("dbg-buffer-tail");
+const dbgLastDecisionEl = document.getElementById("dbg-last-decision");
+
 const graphCtx = graphCanvas.getContext("2d");
 const hiddenCtx = hiddenCanvas.getContext("2d", { willReadFrequently: true });
 
@@ -352,6 +386,63 @@ function updateBanner(state, text, icon) {
   rxBanner.className = "rx-status-banner " + state;
   rxBannerText.textContent = text;
   if (icon) rxBannerIcon.textContent = icon;
+}
+
+function debugTrace(message, type = "info") {
+  if (!dbgEventsEl) return;
+  const entry = document.createElement("div");
+  entry.className = `log-entry ${type}`;
+  const now = new Date();
+  const ts = `${String(now.getHours()).padStart(2,"0")}:${String(now.getMinutes()).padStart(2,"0")}:${String(now.getSeconds()).padStart(2,"0")}`;
+  entry.textContent = `[${ts}] ${message}`;
+  dbgEventsEl.appendChild(entry);
+  while (dbgEventsEl.children.length > DEBUG_MAX_EVENTS) {
+    dbgEventsEl.removeChild(dbgEventsEl.firstChild);
+  }
+  dbgEventsEl.scrollTop = dbgEventsEl.scrollHeight;
+}
+
+function updateDebugPanel() {
+  if (!dbgRxStateEl) return;
+
+  const decision = lastDecisionMeta || {};
+  const joinedBuffer = rxBitBuffer.join("");
+  const lastByte = joinedBuffer.length >= 8 ? joinedBuffer.slice(-8) : "—";
+  const tail = joinedBuffer.length > 64 ? joinedBuffer.slice(-64) : joinedBuffer || "—";
+
+  dbgRxStateEl.textContent = rxState + (readingClockLocked ? " (LOCK)" : "");
+  dbgBaselineEl.textContent = Number.isFinite(ambientBaseline) ? ambientBaseline.toFixed(1) : "—";
+  dbgThresholdEl.textContent = Number.isFinite(threshold) ? threshold.toFixed(1) : "—";
+  dbgCurrentEl.textContent = Number.isFinite(currentBrightness) ? currentBrightness.toFixed(1) : "—";
+  dbgAvgEl.textContent = Number.isFinite(decision.avgBrightness) ? decision.avgBrightness.toFixed(1) : "—";
+  dbgStdEl.textContent = Number.isFinite(decision.stdDev) ? decision.stdDev.toFixed(2) : "—";
+  dbgDistEl.textContent = Number.isFinite(decision.distance) ? decision.distance.toFixed(1) : "—";
+  dbgBitEl.textContent = decision.bit ?? "—";
+  dbgConfEl.textContent = Number.isFinite(decision.confidence) ? `${decision.confidence}%` : "—";
+  dbgSamplesEl.textContent = String(decision.sampleCount ?? 0);
+  dbgPreambleEl.textContent = preambleWindow.join("") || "—";
+  dbgBufferLenEl.textContent = String(rxBitBuffer.length);
+  dbgLastByteEl.textContent = lastByte;
+  dbgPostambleEl.textContent = lastPostambleStatus;
+
+  dbgPreambleWindowEl.textContent = preambleWindow.join(" ") || "—";
+  dbgBufferTailEl.textContent = tail;
+  dbgLastDecisionEl.textContent = JSON.stringify({
+    bitTickIndex,
+    bit: decision.bit,
+    confidence: decision.confidence,
+    avgBrightness: Number.isFinite(decision.avgBrightness) ? Number(decision.avgBrightness.toFixed(2)) : null,
+    stdDev: Number.isFinite(decision.stdDev) ? Number(decision.stdDev.toFixed(3)) : null,
+    distance: Number.isFinite(decision.distance) ? Number(decision.distance.toFixed(2)) : null,
+    sampleCount: decision.sampleCount,
+  }, null, 2);
+}
+
+if (btnDebugClear) {
+  btnDebugClear.addEventListener("click", () => {
+    if (!dbgEventsEl) return;
+    dbgEventsEl.innerHTML = '<div class="log-entry dim">Debug trace cleared.</div>';
+  });
 }
 
 btnRxStart.addEventListener("click", async () => {
@@ -371,6 +462,7 @@ btnCalibrate.addEventListener("click", () => {
 
 async function startReceiver() {
   log("rx-log", "Requesting camera access...", "info");
+  debugTrace("RX start requested", "info");
   updateBanner("calibrating", "STARTING CAMERA...", "⟳");
 
   try {
@@ -405,13 +497,23 @@ async function startReceiver() {
   log("rx-log", `Camera started: ${hiddenCanvas.width}×${hiddenCanvas.height}`, "ok");
 
   rxBitBuffer    = [];
+  rxBitMetaBuffer = [];
   preambleWindow = [];
+  graphData = [];
+  brightnessHistory = [];
+  readingClockLocked = false;
+  bitTickIndex = 0;
+  lastBitValue = "0";
+  lastDecisionMeta = null;
+  lastPostambleStatus = "—";
+  updateDebugPanel();
 
   startBrightnessLoop();
   await runCalibration();
 
   setRxState("SCANNING");
-  startBitSampler();
+  startBitSampler(false);
+  debugTrace("Bit sampler started in SCANNING mode", "ok");
 }
 
 function stopReceiver() {
@@ -427,14 +529,21 @@ function stopReceiver() {
   rxState = "IDLE";
   setRxState("IDLE");
   rxBitBuffer    = [];
+  rxBitMetaBuffer = [];
   preambleWindow = [];
   graphData      = [];
+  brightnessHistory = [];
+  readingClockLocked = false;
+  lastDecisionMeta = null;
+  lastPostambleStatus = "—";
 
   btnRxStart.classList.remove("hidden");
   btnRxStop.classList.add("hidden");
   setSignal("idle", "IDLE");
   updateBanner("idle", "RECEIVER IDLE — PRESS START", "◉");
   log("rx-log", "Receiver stopped.", "info");
+  debugTrace("Receiver stopped and buffers cleared", "info");
+  updateDebugPanel();
 }
 
 function extractRoiBrightness() {
@@ -478,7 +587,15 @@ function startBrightnessLoop() {
       graphData.push(currentBrightness);
       if (graphData.length > GRAPH_HISTORY) graphData.shift();
 
+      brightnessHistory.push({ t: performance.now(), v: currentBrightness });
+      if (brightnessHistory.length > BRIGHTNESS_HISTORY_LIMIT) brightnessHistory.shift();
+
       drawGraph();
+
+      dbgFrameCounter++;
+      if (dbgFrameCounter % 6 === 0) {
+        updateDebugPanel();
+      }
     }
 
     rxAnimFrame = requestAnimationFrame(loop);
@@ -491,6 +608,7 @@ async function runCalibration() {
   setRxState("CALIBRATING");
   updateBanner("calibrating", "CALIBRATING — KEEP LIGHT AWAY FROM SENSOR...", "⟳");
   log("rx-log", `Calibrating for ${CALIB_DURATION_MS}ms — keep light source away...`, "info");
+  debugTrace("Calibration started", "info");
 
   const samples = [];
   const start   = Date.now();
@@ -518,15 +636,23 @@ async function runCalibration() {
 
   statThreshold.textContent = Math.round(threshold);
   log("rx-log", `Ambient: ${Math.round(ambientBaseline)}, Noise: ±${noiseStdDev.toFixed(1)}, Threshold: ${Math.round(threshold)}`, "ok");
+  debugTrace(`Calibration done: baseline=${ambientBaseline.toFixed(2)}, threshold=${threshold.toFixed(2)}, noise=${noiseStdDev.toFixed(2)}`, "ok");
+  updateDebugPanel();
 }
 
-let lastBitValue = "0";  
-
-function startBitSampler() {
+function startBitSampler(lockToPayloadClock) {
   clearInterval(sampleInterval);
 
-  sampleInterval = setInterval(() => {
+  const initialDelay = lockToPayloadClock ? Math.round(BIT_RATE_MS / 2) : BIT_RATE_MS;
+  if (lockToPayloadClock) {
+    readingClockLocked = true;
+    debugTrace(`Clock relock requested: first sample after ${initialDelay}ms`, "info");
+  }
+
+  const tick = () => {
     if (rxState === "IDLE" || rxState === "CALIBRATING" || rxState === "COMPLETE") return;
+
+    bitTickIndex++;
 
     if (rxState === "READING") {
       const elapsed = Date.now() - readingStartTime;
@@ -542,38 +668,85 @@ function startBitSampler() {
       }
     }
 
-    // ── TRUE MULTI-SAMPLING ──
-    // Average the last 5 frames (~80ms of visual data) to smooth out underwater ripples
-    const recentSamples = graphData.slice(-5);
-    const avgBrightness = recentSamples.length > 0 
-      ? recentSamples.reduce((a, b) => a + b, 0) / recentSamples.length 
-      : currentBrightness;
-
-    const brightness = avgBrightness;
-
-    const distFromThreshold = brightness - threshold;
-    const absDistance = Math.abs(distFromThreshold);
-
-    let bit;
-    if (absDistance < HYSTERESIS_BAND) {
-      bit = lastBitValue; 
-    } else {
-      bit = brightness > threshold ? "1" : "0";
-    }
-    lastBitValue = bit;
-
-    lastBitConfidence = Math.min(100, Math.round((absDistance / THRESHOLD_OFFSET) * 100));
+    const decision = computeBitDecision();
+    lastDecisionMeta = decision;
+    lastBitConfidence = decision.confidence;
     statConfidence.textContent = lastBitConfidence + "%";
 
-    if (rxState === "SCANNING" && bit === "0") {
-      ambientBaseline = EMA_ALPHA * brightness + (1 - EMA_ALPHA) * ambientBaseline;
+    if (rxState === "SCANNING" && decision.bit === "0") {
+      ambientBaseline = EMA_ALPHA * decision.avgBrightness + (1 - EMA_ALPHA) * ambientBaseline;
       threshold       = ambientBaseline + THRESHOLD_OFFSET;
       statThreshold.textContent = Math.round(threshold);
     }
 
-    processBit(bit);
+    if (bitTickIndex % 12 === 0) {
+      debugTrace(`Tick ${bitTickIndex}: bit=${decision.bit} conf=${decision.confidence}% avg=${decision.avgBrightness.toFixed(1)} thr=${threshold.toFixed(1)}`, "info");
+    }
 
-  }, BIT_RATE_MS);
+    processBit(decision.bit, decision);
+    updateDebugPanel();
+  };
+
+  setTimeout(() => {
+    tick();
+    sampleInterval = setInterval(tick, BIT_RATE_MS);
+  }, initialDelay);
+}
+
+function computeBitDecision() {
+  const now = performance.now();
+  const windowStart = now - SAMPLE_WINDOW_MS;
+  const windowSamples = brightnessHistory.filter(s => s.t >= windowStart && s.t <= now);
+
+  const samples = windowSamples.length
+    ? windowSamples.map(s => s.v)
+    : graphData.slice(-5);
+
+  const sampleCount = samples.length;
+  const avgBrightness = sampleCount
+    ? samples.reduce((a, b) => a + b, 0) / sampleCount
+    : currentBrightness;
+
+  const variance = sampleCount
+    ? samples.reduce((sum, v) => sum + (v - avgBrightness) ** 2, 0) / sampleCount
+    : 0;
+  const stdDev = Math.sqrt(variance);
+
+  const distance = avgBrightness - threshold;
+  const absDistance = Math.abs(distance);
+
+  let bit;
+  if (absDistance < HYSTERESIS_BAND) {
+    bit = lastBitValue;
+  } else {
+    bit = avgBrightness > threshold ? "1" : "0";
+  }
+  lastBitValue = bit;
+
+  const confidence = Math.min(100, Math.round((absDistance / THRESHOLD_OFFSET) * 100));
+
+  return {
+    bit,
+    confidence,
+    avgBrightness,
+    stdDev,
+    distance,
+    sampleCount,
+  };
+}
+
+function hammingDistance(a, b) {
+  if (a.length !== b.length) return Number.MAX_SAFE_INTEGER;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) diff++;
+  }
+  return diff;
+}
+
+function isPreambleMatch(bits) {
+  const dist = hammingDistance(bits, PREAMBLE);
+  return dist <= PREAMBLE_MAX_HAMMING;
 }
 
 function forceDecodeAndStop(reason) {
@@ -590,11 +763,14 @@ function forceDecodeAndStop(reason) {
   setRxState("COMPLETE");
   updateBanner("error", `${reason} — ${rxBitBuffer.length} BITS RECEIVED`, "⚠");
   rxBitBuffer    = [];
+  rxBitMetaBuffer = [];
   preambleWindow = [];
   reticleBox.classList.remove("locked");
+  debugTrace(`Force stop: ${reason}`, "err");
+  updateDebugPanel();
 }
 
-function processBit(bit) {
+function processBit(bit, meta) {
   statBitsEl.textContent = rxBitBuffer.length;
 
   preambleWindow.push(bit);
@@ -607,22 +783,26 @@ function processBit(bit) {
     updateBanner("scanning", `SCANNING FOR PREAMBLE... [${preambleWindow.join("")}]`, "◎");
 
     const windowStr = preambleWindow.join("");
-    if (windowStr === PREAMBLE) {
-      log("rx-log", `★ PREAMBLE DETECTED [${PREAMBLE}] — Now reading data...`, "ok");
+    if (isPreambleMatch(windowStr)) {
+      const hd = hammingDistance(windowStr, PREAMBLE);
+      log("rx-log", `★ PREAMBLE DETECTED [${windowStr}] (target ${PREAMBLE}, HD=${hd})`, "ok");
+      debugTrace(`Preamble lock: window=${windowStr} hd=${hd} conf=${meta?.confidence ?? "?"}%`, "ok");
+
       setRxState("READING");
-      rxBitBuffer    = [];  
-      preambleWindow = [];  
-      readingStartTime = Date.now(); 
+      rxBitBuffer = [];
+      rxBitMetaBuffer = [];
+      preambleWindow = [];
+      readingStartTime = Date.now();
       reticleBox.classList.add("locked");
 
       liveDecode.innerHTML = '<span class="cursor-blink"></span>';
       liveCharsCount.textContent = "0 chars";
       liveBitsProgress.textContent = "next char: 0/8 bits";
       decodedOutput.innerHTML = '<span class="dim">Receiving data...</span>';
-      updateBanner("reading", "★ PREAMBLE FOUND — RECEIVING DATA...", "⬤");
-      
-      // DEBUG: Log preamble detection for alignment check
-      log("rx-log", `[DEBUG] Preamble detected, starting fresh buffer for payload`, "info");
+      updateBanner("reading", "★ PREAMBLE FOUND — ALIGNING CLOCK...", "⬤");
+
+      startBitSampler(true);
+      updateDebugPanel();
     }
     return;
   }
@@ -630,46 +810,55 @@ function processBit(bit) {
   // ── STATE: READING ──
   if (rxState === "READING") {
     rxBitBuffer.push(bit);
+    rxBitMetaBuffer.push(meta || { confidence: 0 });
     statBitsEl.textContent = rxBitBuffer.length;
     updateBitBufferUI(rxBitBuffer, "data");
 
     updateLiveDecode();
 
     const charsDone = Math.floor(rxBitBuffer.length / 8);
-    const bitsIntoChar = rxBitBuffer.length % 8;
     updateBanner("reading",
       `RECEIVING DATA — ${rxBitBuffer.length} bits (${charsDone} chars decoded)`,
-      "�●");
+      "●");
 
     // ── POSTAMBLE DETECTION (BYTE-ALIGNED ONLY) ──
-    // Only check for postamble at byte boundaries to prevent false positives
-    // The space char (00100000) can create confusing patterns when followed by other bits
-    if (rxBitBuffer.length >= POSTAMBLE.length && rxBitBuffer.length % 8 === 0) {
-      const lastByte = rxBitBuffer.slice(-POSTAMBLE.length).join("");
-      
-      if (lastByte === POSTAMBLE) {
-        // ✓ Postamble detected at byte boundary!
-        clearInterval(sampleInterval); 
+    if (rxBitBuffer.length >= POSTAMBLE.length + POSTAMBLE_MIN_PAYLOAD_BITS && rxBitBuffer.length % 8 === 0) {
+      const tail = rxBitBuffer.slice(-POSTAMBLE.length).join("");
+      const tailConfidence = rxBitMetaBuffer
+        .slice(-POSTAMBLE.length)
+        .reduce((sum, m) => sum + (m.confidence || 0), 0) / POSTAMBLE.length;
 
-        // Extract payload: everything EXCEPT the last 8 bits (the postamble)
+      if (tail === POSTAMBLE && tailConfidence >= POSTAMBLE_MIN_CONFIDENCE) {
+        clearInterval(sampleInterval);
+
         const payloadBits = rxBitBuffer
           .slice(0, rxBitBuffer.length - POSTAMBLE.length)
           .join("");
 
-        log("rx-log", `★ POSTAMBLE DETECTED [${POSTAMBLE}] at byte-aligned position ${rxBitBuffer.length - POSTAMBLE.length}`, "ok");
+        lastPostambleStatus = `MATCH ✓ (conf ${Math.round(tailConfidence)}%)`;
+        log("rx-log", `★ POSTAMBLE DETECTED [${POSTAMBLE}] at bit ${rxBitBuffer.length - POSTAMBLE.length}`, "ok");
         log("rx-log", `Payload extracted: ${payloadBits.length} bits (${Math.floor(payloadBits.length / 8)} complete bytes)`, "ok");
-        log("rx-log", `[DEBUG] Full buffer before extraction: ${rxBitBuffer.join("")}`, "info");
-        log("rx-log", `[DEBUG] Payload bits: ${payloadBits}`, "info");
+        debugTrace(`Postamble accepted: tail=${tail} conf=${tailConfidence.toFixed(1)}%`, "ok");
+
         decodePayload(payloadBits);
 
         setRxState("COMPLETE");
         reticleBox.classList.remove("locked");
-        rxBitBuffer    = [];
+        rxBitBuffer = [];
+        rxBitMetaBuffer = [];
         preambleWindow = [];
 
         log("rx-log", "✓ Transmission complete. Receiver auto-stopped.", "ok");
         log("rx-log", "Press START to receive another message.", "info");
+        updateDebugPanel();
         return;
+      }
+
+      if (tail === POSTAMBLE && tailConfidence < POSTAMBLE_MIN_CONFIDENCE) {
+        lastPostambleStatus = `WEAK MATCH ✗ (${Math.round(tailConfidence)}%)`;
+        debugTrace(`Postamble rejected (low confidence): ${tail} @ ${Math.round(tailConfidence)}%`, "err");
+      } else {
+        lastPostambleStatus = `tail=${tail} (no match)`;
       }
     }
   }
@@ -819,6 +1008,8 @@ function setRxState(newState) {
     btnRxStart.classList.remove("hidden");
     btnRxStart.textContent = "START RECEIVER";
   }
+
+  updateDebugPanel();
 }
 
 function updateBitBufferUI(bits, mode) 

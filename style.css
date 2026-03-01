@@ -569,6 +569,109 @@ textarea::placeholder { color: var(--text-dim); }
   box-shadow: inset 0 0 40px rgba(57,255,20,0.2), 0 0 20px rgba(57,255,20,0.15);
 }
 
+/* ── Debug Panel ── */
+.debug-panel {
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px;
+}
+.debug-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.debug-title {
+  font-family: var(--font-disp);
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  color: var(--cyan);
+}
+.debug-btn {
+  border: 1px solid var(--border2);
+  border-radius: 3px;
+  background: transparent;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  padding: 4px 8px;
+  cursor: pointer;
+  transition: all var(--trans);
+}
+.debug-btn:hover {
+  border-color: var(--cyan);
+  color: var(--cyan);
+  background: var(--cyan-glow);
+}
+.debug-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px 8px;
+}
+.debug-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 4px 6px;
+}
+.debug-item span {
+  color: var(--text-dim);
+  font-size: 8px;
+  letter-spacing: 0.1em;
+}
+.debug-item b {
+  color: var(--amber);
+  font-family: var(--font-disp);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+}
+.debug-block-wrap {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 6px;
+  margin-top: 8px;
+}
+.debug-block-title {
+  color: var(--cyan);
+  font-size: 8px;
+  letter-spacing: 0.16em;
+  margin-bottom: 3px;
+}
+.debug-block pre {
+  margin: 0;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--text);
+  font-size: 10px;
+  line-height: 1.45;
+  padding: 6px;
+  min-height: 24px;
+  max-height: 88px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.debug-trace {
+  margin-top: 4px;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  min-height: 84px;
+  max-height: 140px;
+  overflow-y: auto;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
 /* =====================================================
    ANIMATIONS
    ===================================================== */
