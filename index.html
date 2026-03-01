@@ -11,8 +11,10 @@
 </head>
 <body>
 
+  <!-- Scanline overlay for CRT effect -->
   <div class="scanlines"></div>
 
+  <!-- ==================== BOOT SCREEN ==================== -->
   <div id="boot-screen">
     <div class="boot-logo">
       <span class="boot-title">LI-FI</span>
@@ -22,8 +24,10 @@
     </div>
   </div>
 
+  <!-- ==================== MAIN APP ==================== -->
   <div id="app" class="hidden">
 
+    <!-- Header -->
     <header class="app-header">
       <div class="header-left">
         <span class="logo-text">LI-FI</span>
@@ -39,9 +43,11 @@
       </div>
     </header>
 
+    <!-- ==================== SENDER PANEL ==================== -->
     <section id="panel-sender" class="panel active">
       <div class="panel-grid">
 
+        <!-- Left: Input & Controls -->
         <div class="sender-controls">
           <div class="section-label">// INPUT MESSAGE</div>
           <textarea id="sender-input" placeholder="Type your message here..." maxlength="128"></textarea>
@@ -59,7 +65,7 @@
             <span class="data-label">DATA</span>
             <span id="frame-data" class="frame-data dim">—</span>
             <span class="postamble-label">POSTAMBLE</span>
-            <span id="frame-postamble" class="frame-postamble">00000011</span>
+            <span id="frame-postamble" class="frame-postamble">000000</span>
           </div>
 
           <div class="btn-row">
@@ -68,6 +74,7 @@
           </div>
         </div>
 
+        <!-- Right: Visual Indicator & Status -->
         <div class="sender-visual">
           <div class="section-label">// SIGNAL INDICATOR</div>
           <div class="flashlight-indicator-wrap">
@@ -94,14 +101,17 @@
             </div>
           </div>
 
+          <!-- Screen flash overlay for iOS fallback -->
           <div id="screen-flash" class="screen-flash hidden"></div>
         </div>
 
       </div>
     </section>
 
+    <!-- ==================== RECEIVER PANEL ==================== -->
     <section id="panel-receiver" class="panel hidden">
 
+      <!-- STATUS BANNER — always visible at top of receiver -->
       <div id="rx-status-banner" class="rx-status-banner idle">
         <span class="rx-banner-icon" id="rx-banner-icon">◉</span>
         <span class="rx-banner-text" id="rx-banner-text">RECEIVER IDLE — PRESS START</span>
@@ -109,12 +119,14 @@
 
       <div class="panel-grid receiver-grid">
 
+        <!-- Left: Video + Reticle -->
         <div class="receiver-video-col">
           <div class="section-label">// OPTICAL SENSOR FEED</div>
           <div class="video-wrap" id="video-wrap">
             <video id="receiver-video" autoplay muted playsinline></video>
             <canvas id="hidden-canvas" class="hidden-canvas"></canvas>
 
+            <!-- Overlay reticle -->
             <div class="reticle-overlay" id="reticle-overlay">
               <div class="reticle-box" id="reticle-box">
                 <span class="reticle-corner tl"></span>
@@ -125,6 +137,7 @@
               <div class="reticle-label">ALIGN FLASHLIGHT INSIDE BOX</div>
             </div>
 
+            <!-- State badge on video -->
             <div class="rx-state-badge" id="rx-state-badge">IDLE</div>
           </div>
 
@@ -135,6 +148,7 @@
           </div>
         </div>
 
+        <!-- Right: Graph + Decoder output -->
         <div class="receiver-data-col">
           <div class="section-label">// BRIGHTNESS SIGNAL (LIVE)</div>
           <canvas id="graph-canvas" class="graph-canvas"></canvas>
@@ -174,7 +188,7 @@
             </div>
             <div class="live-decode-info">
               <span id="live-chars-count">0 chars</span>
-              <span id="live-bits-progress">next char: 0/8 bits</span>
+              <span id="live-bits-progress">next char: 0/16 bits</span>
             </div>
           </div>
 
@@ -193,48 +207,13 @@
             <div class="log-entry dim">Receiver not started.</div>
           </div>
 
-          <div class="section-label" style="margin-top:16px">// DEBUG PANEL</div>
-          <div class="debug-panel" id="debug-panel">
-            <div class="debug-toolbar">
-              <span class="debug-title">RX INTERNAL STATE</span>
-              <button id="btn-debug-clear" class="debug-btn">CLEAR TRACE</button>
-            </div>
-
-            <div class="debug-grid">
-              <div class="debug-item"><span>STATE</span><b id="dbg-rx-state">IDLE</b></div>
-              <div class="debug-item"><span>BASELINE</span><b id="dbg-baseline">—</b></div>
-              <div class="debug-item"><span>THRESHOLD</span><b id="dbg-threshold">—</b></div>
-              <div class="debug-item"><span>CURRENT</span><b id="dbg-current">—</b></div>
-              <div class="debug-item"><span>AVG WINDOW</span><b id="dbg-avg">—</b></div>
-              <div class="debug-item"><span>STD DEV</span><b id="dbg-std">—</b></div>
-              <div class="debug-item"><span>DIST</span><b id="dbg-dist">—</b></div>
-              <div class="debug-item"><span>BIT</span><b id="dbg-bit">—</b></div>
-              <div class="debug-item"><span>CONF</span><b id="dbg-conf">—</b></div>
-              <div class="debug-item"><span>SAMPLES</span><b id="dbg-samples">0</b></div>
-              <div class="debug-item"><span>PREAMBLE WIN</span><b id="dbg-preamble">—</b></div>
-              <div class="debug-item"><span>BUFFER LEN</span><b id="dbg-buffer-len">0</b></div>
-              <div class="debug-item"><span>LAST BYTE</span><b id="dbg-last-byte">—</b></div>
-              <div class="debug-item"><span>POSTAMBLE</span><b id="dbg-postamble">—</b></div>
-            </div>
-
-            <div class="debug-block-wrap">
-              <div class="debug-block">
-                <div class="debug-block-title">PREAMBLE WINDOW</div>
-                <pre id="dbg-preamble-window">—</pre>
-              </div>
-              <div class="debug-block">
-                <div class="debug-block-title">BUFFER TAIL (LAST 64 BITS)</div>
-                <pre id="dbg-buffer-tail">—</pre>
-              </div>
-              <div class="debug-block">
-                <div class="debug-block-title">LAST BIT DECISION</div>
-                <pre id="dbg-last-decision">—</pre>
-              </div>
-            </div>
-
-            <div class="debug-block-title" style="margin-top:8px">EVENT TRACE</div>
-            <div class="debug-trace" id="dbg-events">
-              <div class="log-entry dim">Debug trace idle.</div>
+          <div class="section-label" style="margin-top:16px">
+            // DEBUG BITSTREAM
+            <button id="btn-debug-toggle" class="debug-toggle-btn">SHOW</button>
+          </div>
+          <div id="debug-log-section" class="debug-log-section hidden">
+            <div id="debug-log-content" class="debug-log-content">
+              <div class="dim">No bits received yet.</div>
             </div>
           </div>
         </div>
@@ -242,6 +221,8 @@
       </div>
     </section>
 
-  </div><script src="script.js"></script>
+  </div><!-- /app -->
+
+  <script src="script.js"></script>
 </body>
 </html>

@@ -569,109 +569,6 @@ textarea::placeholder { color: var(--text-dim); }
   box-shadow: inset 0 0 40px rgba(57,255,20,0.2), 0 0 20px rgba(57,255,20,0.15);
 }
 
-/* ── Debug Panel ── */
-.debug-panel {
-  background: var(--bg3);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 10px;
-}
-.debug-toolbar {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 10px;
-  margin-bottom: 8px;
-}
-.debug-title {
-  font-family: var(--font-disp);
-  font-size: 10px;
-  letter-spacing: 0.16em;
-  color: var(--cyan);
-}
-.debug-btn {
-  border: 1px solid var(--border2);
-  border-radius: 3px;
-  background: transparent;
-  color: var(--text-dim);
-  font-family: var(--font-mono);
-  font-size: 9px;
-  letter-spacing: 0.14em;
-  padding: 4px 8px;
-  cursor: pointer;
-  transition: all var(--trans);
-}
-.debug-btn:hover {
-  border-color: var(--cyan);
-  color: var(--cyan);
-  background: var(--cyan-glow);
-}
-.debug-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 4px 8px;
-}
-.debug-item {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  background: var(--bg2);
-  border: 1px solid var(--border);
-  border-radius: 3px;
-  padding: 4px 6px;
-}
-.debug-item span {
-  color: var(--text-dim);
-  font-size: 8px;
-  letter-spacing: 0.1em;
-}
-.debug-item b {
-  color: var(--amber);
-  font-family: var(--font-disp);
-  font-size: 10px;
-  letter-spacing: 0.08em;
-}
-.debug-block-wrap {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 6px;
-  margin-top: 8px;
-}
-.debug-block-title {
-  color: var(--cyan);
-  font-size: 8px;
-  letter-spacing: 0.16em;
-  margin-bottom: 3px;
-}
-.debug-block pre {
-  margin: 0;
-  background: var(--bg2);
-  border: 1px solid var(--border);
-  border-radius: 3px;
-  color: var(--text);
-  font-size: 10px;
-  line-height: 1.45;
-  padding: 6px;
-  min-height: 24px;
-  max-height: 88px;
-  overflow: auto;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-.debug-trace {
-  margin-top: 4px;
-  background: var(--bg2);
-  border: 1px solid var(--border);
-  border-radius: 3px;
-  min-height: 84px;
-  max-height: 140px;
-  overflow-y: auto;
-  padding: 6px;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
 /* =====================================================
    ANIMATIONS
    ===================================================== */
@@ -705,3 +602,102 @@ textarea::placeholder { color: var(--text-dim); }
 ::-webkit-scrollbar-track { background: var(--bg2); }
 ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--amber-dim); }
+
+/* =====================================================
+   DEBUG BITSTREAM LOG
+   ===================================================== */
+.debug-toggle-btn {
+  font-family: var(--font-mono);
+  font-size: 8px;
+  letter-spacing: 0.1em;
+  padding: 2px 8px;
+  background: transparent;
+  border: 1px solid var(--border2);
+  color: var(--text-dim);
+  cursor: pointer;
+  border-radius: 2px;
+  margin-left: 8px;
+  transition: all var(--trans);
+}
+.debug-toggle-btn:hover {
+  border-color: var(--amber);
+  color: var(--amber);
+}
+.debug-log-section {
+  margin-top: 4px;
+}
+.debug-log-content {
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  max-height: 500px;
+  overflow-y: auto;
+  font-size: 10px;
+}
+.debug-section-title {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.2em;
+  color: var(--cyan);
+  margin-bottom: 6px;
+  text-transform: uppercase;
+}
+.debug-bitstream {
+  word-break: break-all;
+  line-height: 1.8;
+  font-size: 12px;
+  letter-spacing: 0.05em;
+  font-family: var(--font-mono);
+}
+.debug-bit { padding: 1px; }
+.debug-bit.db1 { color: var(--green); }
+.debug-bit.db0 { color: var(--red-dim); }
+.debug-char-entry {
+  font-size: 11px;
+  padding: 4px 8px;
+  margin-bottom: 2px;
+  border-radius: 2px;
+  font-family: var(--font-mono);
+}
+.debug-char-entry.odd { background: var(--bg2); }
+.debug-char-entry.even { background: rgba(245,166,35,0.04); }
+.debug-block-num {
+  font-size: 9px; color: var(--text-dim);
+  display: inline-block; width: 28px;
+}
+.debug-pair-label {
+  font-size: 8px; color: var(--cyan-dim);
+  letter-spacing: 0.1em;
+  display: inline-block; width: 48px;
+}
+.debug-bits { color: var(--amber); letter-spacing: 0.08em; }
+.debug-bits-partial { color: var(--text-dim); }
+.debug-char { color: var(--cyan); }
+.debug-charcode { font-size: 9px; color: var(--text-dim); }
+.vote-ok   { background: rgba(0,255,65,0.15); color: var(--green); }
+.vote-fix  { background: rgba(245,166,35,0.2); color: var(--amber); }
+.vote-err  { background: rgba(255,50,50,0.2); color: var(--red, #ff4444); }
+.debug-table {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+.debug-row {
+  display: grid;
+  grid-template-columns: 100px 30px 50px 50px 40px 80px;
+  gap: 4px;
+  padding: 2px 4px;
+  border-bottom: 1px solid var(--border);
+}
+.debug-row.header {
+  color: var(--cyan);
+  font-weight: bold;
+  border-bottom: 1px solid var(--border2);
+  position: sticky;
+  top: 0;
+  background: var(--bg3);
+}
+.debug-row .db1 { color: var(--green); }
+.debug-row .db0 { color: var(--red-dim); }
